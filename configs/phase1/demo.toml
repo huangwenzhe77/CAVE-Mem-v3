@@ -1,0 +1,25 @@
+# Software fixture only. These numbers are NOT experimental sample sizes.
+[study]
+study_id = "phase1-fixture-demo"
+base_seed = 42
+max_steps = 4
+max_model_calls = 4
+lambda_inference = 0.01
+lambda_tool = 0.0
+
+[actor]
+kind = "scripted"
+
+[environment]
+kind = "fixture"
+
+[collection]
+mode = "fixed_runs"
+runs_per_task = 2
+max_runs = 4
+
+[verification]
+screening_pairs = 2
+confirmation_pairs = 16
+confidence = 0.95
+acceptance_epsilon = 0.0

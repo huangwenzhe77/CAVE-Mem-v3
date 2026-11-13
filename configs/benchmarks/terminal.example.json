@@ -1,0 +1,11 @@
+{
+  "benchmark": "terminal-bench@2.0",
+  "revision": "REPLACE_WITH_BENCHMARK_COMMIT",
+  "tasks": [
+    {"task_id": "REPLACE_SOURCE_TASK", "group_id": "source-family-template-A", "role": "history", "path": "/replace/terminal-bench-2/source-task"},
+    {"task_id": "REPLACE_TARGET_TASK", "group_id": "target-family-template-B", "role": "target_train", "path": "/replace/terminal-bench-2/target-task"},
+    {"task_id": "REPLACE_CALIBRATION_TASK", "group_id": "validation-family-template-C", "role": "validation", "validation_role": "calibration", "path": "/replace/terminal-bench-2/calibration-task"},
+    {"task_id": "REPLACE_SELECTION_TASK", "group_id": "validation-family-template-D", "role": "validation", "validation_role": "selection", "path": "/replace/terminal-bench-2/selection-task"},
+    {"task_id": "REPLACE_TEST_TASK", "group_id": "test-family-template-E", "role": "test", "path": "/replace/terminal-bench-2/test-task"}
+  ]
+}

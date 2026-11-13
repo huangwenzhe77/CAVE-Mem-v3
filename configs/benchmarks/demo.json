@@ -1,0 +1,12 @@
+{
+  "benchmark": "preparation-fixture",
+  "revision": "fixture-v3",
+  "tasks": [
+    {"task_id": "history-risk", "group_id": "source-risk", "role": "history", "environment": {"requires_preparation": true, "safe_intent": false}},
+    {"task_id": "history-safe", "group_id": "source-safe", "role": "history", "environment": {"requires_preparation": true, "safe_intent": true}},
+    {"task_id": "target-training", "group_id": "target-training", "role": "target_train"},
+    {"task_id": "validation-calibration", "group_id": "validation-calibration", "role": "validation", "validation_role": "calibration"},
+    {"task_id": "validation-selection", "group_id": "validation-selection", "role": "validation", "validation_role": "selection"},
+    {"task_id": "final-test", "group_id": "final-test", "role": "test"}
+  ]
+}

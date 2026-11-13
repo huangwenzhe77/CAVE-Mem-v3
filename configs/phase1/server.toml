@@ -1,0 +1,45 @@
+# Fill deployment and sampling choices on the server. No model is downloaded.
+[study]
+study_id = "phase1-source-pilot"
+base_seed = 42
+max_steps = 30
+max_model_calls = 30
+# Example utility units, to be fixed before a real collection.
+lambda_inference = 0.01
+lambda_tool = 0.0
+inference_weights = { model_calls = 1.0 }
+tool_weights = { tool_calls = 1.0 }
+
+[actor]
+kind = "openai_compatible"
+model = "Qwen/Qwen2.5-7B-Instruct"
+revision = ""
+base_url = ""
+local_model_path = ""
+# Optional: explicit response alias / known deployment fingerprint.
+response_model = ""
+expected_fingerprint = ""
+api_key_env = "CAVE_MODEL_API_KEY"
+temperature = 0.2
+max_output_tokens = 1024
+send_seed = true
+
+[environment]
+kind = "terminal"
+# This adapter uses reviewed filesystem checkpoints, not persistent processes.
+# Each real task also needs a restore audit before source confirmation.
+
+[collection]
+mode = "fixed_runs"
+# Intentionally unset: decide after a small, separate engineering pilot.
+# runs_per_task = ...
+# max_runs = ...
+# Exploration alternative: mode = "failure_target", failure_target = ...
+# Both modes still require runs_per_task and max_runs hard limits.
+
+[verification]
+confidence = 0.95
+acceptance_epsilon = 0.0
+# Intentionally unset; these count PAIRS per candidate, not failed trajectories.
+# screening_pairs = ...
+# confirmation_pairs = ...
