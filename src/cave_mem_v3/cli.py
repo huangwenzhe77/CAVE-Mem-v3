@@ -25,25 +25,42 @@ def _new_directory(path):
     return path
 
 
+def _provider(raw, section):
+    from cave_mem_v3.agents.providers import OpenAICompatibleProvider, OpenAIConfig
+    config = copy.deepcopy(raw[section])
+    kind = config.pop("kind")
+    if kind != "openai_compatible":
+        raise ValueError(f"{section} must use an openai_compatible provider for real requests")
+    for key in ("model", "base_url", "revision"):
+        if not config.get(key):
+            raise ValueError(f"configure {section}.{key} before real model requests")
+    return OpenAICompatibleProvider(OpenAIConfig(**config))
+
+
 def _actor(raw):
-    from cave_mem_v3.agents.providers import OpenAICompatibleProvider, OpenAIConfig, ProviderActor, ScriptedActor
+    from cave_mem_v3.agents.providers import ProviderActor, ScriptedActor
     config = copy.deepcopy(raw["actor"])
     kind = config.pop("kind")
     if kind == "scripted":
         if raw["environment"]["kind"] != "fixture":
             raise ValueError("scripted actor is restricted to software fixtures")
         return ScriptedActor(**config)
-    for key in ("model", "base_url", "revision"):
-        if not config.get(key):
-            raise ValueError(f"configure actor.{key} before real model requests")
     prompt = config.pop("system_prompt", None)
-    provider = OpenAICompatibleProvider(OpenAIConfig(**config))
+    raw_with_actor = copy.deepcopy(raw)
+    raw_with_actor["actor"] = {"kind": kind, **config}
+    provider = _provider(raw_with_actor, "actor")
     if prompt is None:
         prompt = ('Solve the task using the visible observations and executed history. '
                   'Return exactly one JSON action: {"type":"shell","command":"..."} '
                   'or {"type":"finish"} when complete. Each shell command starts a fresh '
                   'process; filesystem changes persist. No markdown or explanation.')
     return ProviderActor(provider, system_prompt=prompt)
+
+
+def _teacher(raw):
+    if "teacher" not in raw:
+        raise ValueError("automatic hypotheses require a separate [teacher] provider configuration")
+    return _provider(raw, "teacher")
 
 
 def _env_factory(raw, manifest):
@@ -69,6 +86,15 @@ def _env_factory(raw, manifest):
         expected = task.get("terminal_asset_hash")
         if expected is None or terminal.asset_hash != expected:
             raise ValueError("terminal task assets differ from the prepared manifest")
+        backend_name = raw["environment"].get("backend", "docker")
+        if backend_name == "enroot":
+            from cave_mem_v3.environments.enroot import EnrootBackend
+            snapshots = raw["environment"].get("snapshot_dir")
+            if not snapshots:
+                raise ValueError("configure environment.snapshot_dir for Enroot")
+            return TerminalEnvironment(terminal, backend=EnrootBackend(snapshots))
+        if backend_name != "docker":
+            raise ValueError("environment.backend must be docker or enroot")
         return TerminalEnvironment(terminal)
     return factory
 
@@ -141,11 +167,12 @@ def _candidates(args):
     else:
         if not args.config:
             raise ValueError("--generate requires --config with a configured hypothesis model")
-        actor = _actor(load_config(args.config))
-        provider = getattr(actor, "provider", None)
-        if provider is None:
-            raise ValueError("automatic hypotheses require a real configured provider")
-        failures = [t for t in traces if t["episode"].get("success") is False and t["episode"].get("status") != "error"]
+        provider = _teacher(load_config(args.config))
+        failures = [t for t in traces if t["episode"].get("success") is False
+                    and t["episode"].get("status") in ("terminal", "budget_exhausted")]
+        excluded = [{"trace_id": t["trace_id"], "task_id": t["task_id"],
+                     "status": t["episode"].get("status"), "reason": "not_a_scored_task_failure"}
+                    for t in traces if t["episode"].get("success") is False and t not in failures]
         plan = {"source_run_hash": traces[0]["run_hash"], "source_trace_hashes": [t["trace_hash"] for t in traces],
                 "provider_config": provider.configuration(), "max_candidates": args.max_candidates,
                 "schedule": [t["trace_id"] for t in failures]}
@@ -193,9 +220,12 @@ def _candidates(args):
     output = {"schema_version": "source-candidates.v3", "candidates": candidates,
               "generations": generations, "source_run_hash": traces[0]["run_hash"],
               "note": "Unverified hypotheses. Editing requires replay of the finalized candidate."}
+    if args.generate:
+        output["excluded_source_traces"] = excluded
     write_json(args.output, output)
     return {"output": str(Path(args.output).resolve()), "candidate_count": len(candidates),
-            "generation_errors": sum(g.get("status") == "error" for g in generations)}
+            "generation_errors": sum(g.get("status") == "error" for g in generations),
+            "excluded_source_traces": len(excluded) if args.generate else 0}
 
 
 def _verify(args):

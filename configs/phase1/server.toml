@@ -1,10 +1,10 @@
-# Fill deployment and sampling choices on the server. No model is downloaded.
+# Frozen engineering pilot choices; credentials remain outside this file.
 [study]
 study_id = "phase1-source-pilot"
 base_seed = 42
-max_steps = 30
-max_model_calls = 30
-# Example utility units, to be fixed before a real collection.
+max_steps = 6
+max_model_calls = 6
+# Pilot utility: one-hundredth per model call.
 lambda_inference = 0.01
 lambda_tool = 0.0
 inference_weights = { model_calls = 1.0 }
@@ -13,33 +13,46 @@ tool_weights = { tool_calls = 1.0 }
 [actor]
 kind = "openai_compatible"
 model = "Qwen/Qwen2.5-7B-Instruct"
-revision = ""
-base_url = ""
-local_model_path = ""
+revision = "a09a35458c702b33eeacc393d103063234e8bc28"
+base_url = "http://127.0.0.1:8000/v1"
+local_model_path = "/home/ljj/models/Qwen2.5-7B-Instruct"
 # Optional: explicit response alias / known deployment fingerprint.
 response_model = ""
 expected_fingerprint = ""
-api_key_env = "CAVE_MODEL_API_KEY"
+api_key_env = ""
 temperature = 0.2
 max_output_tokens = 1024
 send_seed = true
+response_format = "json_object"
+
+[teacher]
+kind = "openai_compatible"
+# Live authentication passed. Gateway exposes an alias, not a weight revision.
+model = "gpt-5.6-terra"
+revision = "gpt-5.6-terra@gateway-alias-2026-11-14-unversioned"
+base_url = "https://api.aicodemirror.ai/v1"
+local_model_path = ""
+response_model = "gpt-5.6-terra"
+expected_fingerprint = ""
+api_key_env = "OPENAI_API_KEY"
+temperature = 0.0
+max_output_tokens = 2048
+send_seed = false
 
 [environment]
 kind = "terminal"
-# This adapter uses reviewed filesystem checkpoints, not persistent processes.
-# Each real task also needs a restore audit before source confirmation.
+backend = "enroot"
+snapshot_dir = "/home/ljj/CAVE-Mem-v3/data/snapshots"
+# Enroot task-scope diagnostics are unapproved; formal v=1 replay is blocked.
 
 [collection]
 mode = "fixed_runs"
-# Intentionally unset: decide after a small, separate engineering pilot.
-# runs_per_task = ...
-# max_runs = ...
-# Exploration alternative: mode = "failure_target", failure_target = ...
-# Both modes still require runs_per_task and max_runs hard limits.
+runs_per_task = 1
+max_runs = 3
 
 [verification]
 confidence = 0.95
 acceptance_epsilon = 0.0
-# Intentionally unset; these count PAIRS per candidate, not failed trajectories.
-# screening_pairs = ...
-# confirmation_pairs = ...
+screening_pairs = 1
+confirmation_pairs = 2
+# Formal verification defaults remain distinct from the pilot's two-pair gate.

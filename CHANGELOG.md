@@ -1,5 +1,55 @@
 # 变更记录
 
+## 2026-11-14 — H20 Terminal-Bench 工程 pilot
+
+### 失败归因复核及新一轮采集
+
+- `src/cave_mem_v3/agents/providers.py`：可显式请求 OpenAI-compatible `json_object` 输出，记录在冻结的 provider 配置与请求中；默认纯文本行为及单次计费不变。
+- `tests/test_providers.py`：覆盖 actor JSON 请求、教师默认请求及非法配置。
+- `configs/phase1/server.toml`：只为 Qwen actor 打开 `response_format="json_object"`；教师接口不变。该变动要求新的历史 run，不能与旧 checkpoint 混用。
+- `src/cave_mem_v3/cli.py`：自动教师生成跳过未完成评分的无效动作轨迹，输出被排除的来源 ID 与原因；手工模板及正式评分不变。
+- `tests/test_cli.py`：验证未解析动作不会发送给教师、会被显式记录为排除。
+- `scripts/phase1_actor_service.py`：将一次性 H20 vLLM 启动/清理及采集或回放调度放进版本控制，显式不把教师密钥传给 actor 作业。
+- `scripts/phase1_pilot_replay.py`：收录本轮 K=2 来源配对工程回放，输出只标作暂定库，不修改正式 `verify`/`bank`。
+- `docs/phase1.md`：明确任务为事先有目的选择、旧轮程序/格式问题和官方测试失败的区分。
+
+`runs/pilot-20261114-r2/` 的 3 条历史轨迹均未成功，教师 3 次请求完成并生成 3 条候选；各候选的 K=2 来源回放均未通过，暂定库为 0。`regex-log` 原始 actor 的 JSON 反斜杠转义错误，命令未执行；`fix-git` 官方测试 2 项失败；`sqlite-db-truncate` 中 actor 重复调用镜像内不存在的 `sqlite3`，教师候选又遇到截断数据库不可直接用 sqlite3 读取。Enroot 的 shadow 钩子警告混入 stderr，命令返回码和独立官方测试仍可用，但会污染 actor 观察，尚不能声称与原生 Harbor 会话等价。旧轮产物不改写；新配置从 `runs/pilot-20261114-r3/` 重新采集。
+
+`r3` 在同一预冻结的 3 道 history 上重新采集：3 次运行、0 成功、3 次官方测试失败、0 基础设施错误、0 JSON 解析错误。actor 采集调用 18 次，输入/输出 token 为 19,524/862，执行 18 次 shell；教师 3 次调用均完成，生成 3 个候选，输入/输出 token 为 9,831/3,146，排除轨迹 0。两组来源配对回放每候选各 2 组，共 6 组；回放 actor 调用 31 次，输入/输出 token 为 45,257/1,396，执行 42 次 shell，0 异常、0 解析错误。`regex-log` 候选 `9ae9c24d...` 两组原动作失败/修正成功，效用差均 +1，进入 `pilot-provisional-bank.json`；`fix-git` `2f57b185...` 和 `sqlite-db-truncate` `789d03f6...` 两组均不通过并被排除。暂定库 1，**正式 `v=1` 库 0**。总模型调用 52 次、输入 74,612 token、输出 5,404 token；未配置单价，货币成本未知，不推算。H20 作业结束后 vLLM 进程退出。
+
+### 修改文件
+
+- `src/cave_mem_v3/environments/terminal.py`：描述从 Docker 独占改为容器后端通用；正式恢复判据未放宽。
+- `src/cave_mem_v3/environments/enroot.py`：新增独立 SquashFS 镜像快照、actor 隔离、临时 tests 副本评分和 `/tmp` 动作边界同步；原 Docker 后端保留。
+- `src/cave_mem_v3/cli.py`：终端任务可显式选择 Enroot，未选择时仍用 Docker；教师和 actor 仍使用不同配置。
+- `src/cave_mem_v3/common/config.py`：`check` 显示本地模型目录是否存在，并声明不是权重版本证明。
+- `configs/phase1/server.toml`：冻结本轮 H20 actor、教师网关别名、3 次历史采集与 6 步预算；本地 actor 无需 API key，教师密钥只从服务器环境读取。
+- `tests/test_cli.py`：适配服务器 pilot 配置的只读检查。
+- `tests/test_enroot.py`：检查 actor 的隔离参数和 `/tmp` 快照处理。
+- `docs/phase1.md`：记录 Enroot 适用范围、7 道任务的角色分离、K=2 暂定库与正式 `v=1` 的差异。
+
+### 未提交的服务器数据
+
+- `data/terminal-bench-2/`：官方 v2 任务仓库（89 道任务），固定提交 `2fd12b88aafdd04a52c298e3940bcb189f9766d6`；每个子目录是一道任务，不是独立数据集。
+- `data/images/`、`data/snapshots/`：Enroot 任务镜像和动作快照；`data/pilot_catalog.json` 预先冻结任务角色与镜像，脚本仅在 ignored `data/` 运行。
+- `runs/pilot-20261114/`：首轮 3 条 actor 凭证缺失导致的基础设施错误，保留原始记录。
+- `runs/pilot-20261114-r2/`：同一任务划分重跑的真实轨迹、自动候选、恢复诊断与来源回放；临时结果不冒充正式记忆库。
+
+教师网关未提供可验证权重 revision；官方 verifier 联网取依赖，恢复审计仍标为未正式批准。K=2 暂定门槛不修改原版评分或 `v=1` 定义。
+
+## 2026-11-13 — 第一部分接入独立教师配置
+
+### 修改文件
+
+- `.gitignore`：忽略服务器上的 `data/` benchmark 任务资产，避免将官方数据集和缓存误提交。
+- `src/cave_mem_v3/cli.py`：自动候选生成改为读取独立 `[teacher]` provider；冻结 actor 仍只由 `[actor]` 驱动。
+- `src/cave_mem_v3/common/config.py`：允许可选教师配置，并在存在时检查其模型、endpoint 和 revision。
+- `configs/phase1/server.toml`：独立 teacher 采用用户给定的 `gpt-5.6-terra`、`https://api.aicodemirror.ai/v1` 和 `OPENAI_API_KEY` 环境变量；鉴权尚未通过，revision 仍未冻结，密钥不写入文件。
+- `docs/phase1.md`：明确 actor/teacher 分离及密钥读取边界。
+- `tests/test_cli.py`：更新自动候选 journal 测试，覆盖服务器模板的教师待配置状态。
+
+候选仍是未验证假说，只有独立来源配对回放通过后才允许写入记忆库。
+
 ## 2026-11-13 — 按职责整理研究仓库
 
 单 agent 完成。读取 GitHub 上 `huangwenzhe77/SkillRL` 的根目录、`agent_system/` 与 `skill_generation/`，采用其功能分组、示例和文档分工；CAVE 保留 `src` 包布局与 `cave3` 命令。此次改动发生在本地 CAVE-Mem-v3，未发布到 GitHub。

@@ -96,6 +96,7 @@ class OpenAIConfig:
     cached_input_price_per_million: float | None = None
     token_limit_parameter: str = "max_tokens"
     send_temperature: bool = True
+    response_format: str = "text"
 
     def __post_init__(self) -> None:
         if not self.model or self.base_url and not self.base_url.startswith(("http://", "https://")):
@@ -111,6 +112,8 @@ class OpenAIConfig:
             raise ValueError("unsupported token limit parameter")
         if type(self.send_temperature) is not bool:
             raise ValueError("send_temperature must be boolean")
+        if self.response_format not in ("text", "json_object"):
+            raise ValueError("response_format must be text or json_object")
         if type(self.max_output_tokens) is not int or self.max_output_tokens < 1:
             raise ValueError("max_output_tokens must be a positive integer")
         finite(self.temperature, "temperature", minimum=0)
@@ -184,6 +187,8 @@ class OpenAICompatibleProvider:
             payload["temperature"] = self.config.temperature
         if self.config.send_seed:
             payload["seed"] = seed
+        if self.config.response_format == "json_object":
+            payload["response_format"] = {"type": "json_object"}
         requested = {k: v for k, v in payload.items() if k != "messages"}
         attempt = {"attempt_id": call_id or digest([stage, seed, payload])[:24],
                    "stage": stage, "status": "started", "request_hash": digest(payload),

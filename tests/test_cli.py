@@ -67,11 +67,11 @@ class CommandTests(unittest.TestCase):
             self.assertTrue(all(m["quality"]["v"] == 1 for m in bank["memories"]))
             self.invoke("bank", "--verification", verification, "--output", bank_path, expected=2)
 
-    def test_unconfigured_server_is_reported_without_download_or_requests(self):
+    def test_pilot_server_choices_are_reported_without_download_or_requests(self):
         result = self.invoke("check", "--config", ROOT / "configs" / "phase1" / "server.toml")
-        self.assertFalse(result["ready"])
-        self.assertIn("actor.base_url", result["pending"])
-        self.assertIn("verification.confirmation_pairs", result["pending"])
+        self.assertTrue(result["ready"])
+        self.assertEqual(result["pending"], [])
+        self.assertEqual(result["model_downloaded"], Path("/home/ljj/models/Qwen2.5-7B-Instruct").is_dir())
 
     def test_missing_collection_budget_does_not_fall_back_to_library_defaults(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -104,7 +104,7 @@ class CommandTests(unittest.TestCase):
                         "usage": {"prompt_tokens": 100, "completion_tokens": 30}}
             provider = OpenAICompatibleProvider(OpenAIConfig(), transport=transport)
             output = root / "generated.json"
-            with patch("cave_mem_v3.cli._actor", return_value=SimpleNamespace(provider=provider)):
+            with patch("cave_mem_v3.cli._teacher", return_value=provider):
                 result = self.invoke("candidates", "--collection", collection, "--output", output,
                                      "--generate", "--config", config)
                 self.assertEqual(result["generation_errors"], 1)
@@ -115,6 +115,22 @@ class CommandTests(unittest.TestCase):
                 self.invoke("candidates", "--collection", collection, "--output", output,
                             "--generate", "--config", config)
                 self.assertEqual(len(calls), 2)
+
+    def test_automatic_generation_excludes_unparsed_actor_failure(self):
+        from cave_mem_v3.agents.providers import OpenAIConfig, OpenAICompatibleProvider
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "candidates.json"
+            trace = {"trace_id": "bad-action", "task_id": "regex-log", "run_hash": "source-run",
+                     "trace_hash": "source-trace", "episode": {"success": False, "status": "invalid_action"}}
+            provider = OpenAICompatibleProvider(OpenAIConfig(),
+                transport=lambda _: self.fail("unparsed task failure must not be sent to teacher"))
+            with patch("cave_mem_v3.cli._collection_traces", return_value=[trace]), \
+                 patch("cave_mem_v3.cli._teacher", return_value=provider):
+                result = self.invoke("candidates", "--collection", directory, "--output", output,
+                                     "--generate", "--config", ROOT / "configs" / "phase1" / "demo.toml")
+            self.assertEqual(result["candidate_count"], 0)
+            self.assertEqual(result["excluded_source_traces"], 1)
+            self.assertEqual(read_json(output)["excluded_source_traces"][0]["trace_id"], "bad-action")
 
 
 if __name__ == "__main__":
