@@ -19,7 +19,5 @@ runs_per_task = 2
 max_runs = 4
 
 [verification]
-screening_pairs = 2
-confirmation_pairs = 16
-confidence = 0.95
+replay_pairs = 2
 acceptance_epsilon = 0.0

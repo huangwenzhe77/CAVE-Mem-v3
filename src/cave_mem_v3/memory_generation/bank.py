@@ -17,9 +17,9 @@ def _quality(evidence: dict | None) -> dict:
         return {"v": "?", "reason": "unverified_hypothesis", "scope": None}
     spec = evidence["plan"]["replay_spec"]
     return {"v": evidence["v"], "reason": evidence["reason"], "scope": evidence["scope"],
-            "endpoint": evidence["endpoint"], "confidence": spec["confidence"],
-            "family_size": spec["family_size"], "n_confirmation": evidence["n_confirmation"],
-            "lower_bound": evidence["lower_bound"], "upper_bound": evidence["upper_bound"],
+            "endpoint": evidence["endpoint"], "n_replay_pairs": evidence["n_replay_pairs"],
+            "mean_difference": evidence["mean_difference"], "acceptance_epsilon": spec["acceptance_epsilon"],
+            "decision_rule": evidence["decision_rule"],
             "evidence_hash": evidence["evidence_hash"], "claim_boundary": evidence["claim_boundary"]}
 
 

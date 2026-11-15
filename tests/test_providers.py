@@ -33,6 +33,25 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(actor.configuration()["provider"]["revision"], "fixed")
         self.assertFalse(actor.capabilities()["deterministic_sampling_certified"])
 
+    def test_actor_json_mode_is_explicit_and_metered(self):
+        calls = []
+        provider = OpenAICompatibleProvider(OpenAIConfig(response_format="json_object"),
+            transport=lambda payload: calls.append(payload) or response('{"type":"shell","command":"echo ok"}'))
+        result = ProviderActor(provider).propose(PublicContext("task", "instruction", "observation"),
+            stage="source", seed=1)
+        self.assertEqual(calls[0]["response_format"], {"type": "json_object"})
+        self.assertEqual(result.action["command"], "echo ok")
+        self.assertEqual(result.usage["model_calls"], 1)
+        self.assertEqual(provider.configuration()["response_format"], "json_object")
+
+    def test_teacher_default_does_not_request_actor_json_mode(self):
+        calls = []
+        OpenAICompatibleProvider(OpenAIConfig(), transport=lambda payload: calls.append(payload) or response()).generate(
+            [{"role": "user", "content": "test"}], stage="source_hypothesis", seed=1)
+        self.assertNotIn("response_format", calls[0])
+        with self.assertRaisesRegex(ValueError, "response_format"):
+            OpenAIConfig(response_format="unsupported")
+
     def test_malformed_completed_response_remains_a_metered_failure(self):
         actor = ProviderActor(OpenAICompatibleProvider(OpenAIConfig(), transport=lambda _: response("not json")))
         trace = run_episode(PreparationEnvironment(), actor, spec=StudySpec(), seed=0)

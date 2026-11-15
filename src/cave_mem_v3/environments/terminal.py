@@ -1,4 +1,4 @@
-"""Pinned Terminal-Bench 2 task assets and a restricted Docker execution adapter.
+"""Pinned Terminal-Bench 2 task assets and restricted container adapters.
 
 This is an explicit filesystem-at-action-boundaries protocol, not Harbor's
 interactive shell/session semantics. Tests and solutions never enter actor

@@ -18,21 +18,24 @@ class EvidenceTests(unittest.TestCase):
         self.trace = source_trace()
         self.candidate = repair(self.trace)
         self.study = StudySpec(max_steps=4, max_model_calls=4)
-        self.spec = ReplaySpec(screening_pairs=2, confirmation_pairs=16)
+        self.spec = ReplaySpec(replay_pairs=2)
 
     def evidence(self, **kwargs):
         return verify_candidate(self.candidate, self.trace,
                                 lambda: PreparationEnvironment(task_id="source-a"), ScriptedActor,
                                 study=self.study, replay_spec=self.spec, **kwargs)
 
-    def test_independent_confirmation_and_bank_roundtrip(self):
+    def test_fixed_k_replay_and_bank_roundtrip(self):
         with tempfile.TemporaryDirectory() as temporary:
             evidence = self.evidence(output_dir=Path(temporary) / "replays")
             self.assertEqual(evidence["v"], 1)
-            self.assertGreater(evidence["lower_bound"], 0)
+            self.assertEqual(evidence["mean_difference"], 0.98)
+            self.assertNotIn("lower_bound", evidence)
             self.assertEqual(evidence["independent_source_tasks"], 1)
-            self.assertTrue(set(r["seed"] for r in evidence["screening"]).isdisjoint(r["seed"] for r in evidence["confirmation"]))
+            self.assertEqual(len(evidence["pairs"]), self.spec.replay_pairs)
+            self.assertEqual(evidence["n_replay_pairs"], self.spec.replay_pairs)
             memory = build_memory(self.candidate, self.trace, evidence)
+            self.assertEqual(memory.quality["mean_difference"], 0.98)
             path = Path(temporary) / "bank.json"
             bank = freeze_bank([memory], path, source_traces=[self.trace])
             self.assertEqual(load_bank(path), bank)
@@ -44,47 +47,58 @@ class EvidenceTests(unittest.TestCase):
     def test_replay_labels_and_report_tampering_detected(self):
         evidence = self.evidence()
         bad = copy.deepcopy(evidence)
-        bad["lower_bound"] = 100
+        bad["mean_difference"] = 100
         with self.assertRaises(ValueError):
             validate_evidence(bad, trace=self.trace)
         bad = copy.deepcopy(evidence)
-        arm = bad["confirmation"][0]["arms"]["corrected"]
+        arm = bad["pairs"][0]["arms"]["corrected"]
         arm["utility"] = 0.1
-        row = bad["confirmation"][0]
+        row = bad["pairs"][0]
         row["record_hash"] = digest({k: v for k, v in row.items() if k != "record_hash"})
         with self.assertRaises(ValueError):
-            evaluate_evidence(bad["plan"], bad["screening"], bad["confirmation"])
+            evaluate_evidence(bad["plan"], bad["pairs"])
 
-    def test_missing_or_duplicate_confirmation_never_passes(self):
+    def test_missing_or_duplicate_replay_pair_never_passes(self):
         evidence = self.evidence()
-        incomplete = evaluate_evidence(evidence["plan"], evidence["screening"], evidence["confirmation"][:-1])
+        incomplete = evaluate_evidence(evidence["plan"], evidence["pairs"][:-1])
         self.assertEqual(incomplete["v"], "?")
-        duplicated = copy.deepcopy(evidence["confirmation"])
+        duplicated = copy.deepcopy(evidence["pairs"])
         duplicated[1] = duplicated[0]
         with self.assertRaises(ValueError):
-            evaluate_evidence(evidence["plan"], evidence["screening"], duplicated)
+            evaluate_evidence(evidence["plan"], duplicated)
         with self.assertRaises(ValueError):
             build_memory(self.candidate, self.trace, incomplete)
+
+    def test_mean_must_exceed_registered_threshold(self):
+        spec = ReplaySpec(replay_pairs=2, acceptance_epsilon=0.98)
+        evidence = verify_candidate(self.candidate, self.trace,
+                                    lambda: PreparationEnvironment(task_id="source-a"), ScriptedActor,
+                                    study=self.study, replay_spec=spec)
+        self.assertEqual(evidence["mean_difference"], 0.98)
+        self.assertEqual(evidence["v"], 0)
+        with self.assertRaises(ValueError):
+            build_memory(self.candidate, self.trace, evidence)
 
     def test_error_is_not_a_zero_reward_failure_or_dropped_pair(self):
         count = 0
         def runner(*args, **kwargs):
             nonlocal count
             count += 1
-            if count == 5:
+            if count == 3:
                 raise RuntimeError("simulated provider outage")
             return run_episode(*args, **kwargs)
         evidence = self.evidence(episode_runner=runner)
-        self.assertEqual(len(evidence["confirmation"]), self.spec.confirmation_pairs)
+        self.assertEqual(len(evidence["pairs"]), self.spec.replay_pairs)
         self.assertEqual(evidence["v"], "?")
-        self.assertEqual(evidence["reason"], "confirmation_contains_error_or_invalid_repair")
+        self.assertEqual(evidence["reason"], "replay_contains_error_or_invalid_repair")
 
     def test_changed_actor_and_uncertified_restoration_fail_closed(self):
         evidence = verify_candidate(self.candidate, self.trace,
             lambda: PreparationEnvironment(task_id="source-a"), lambda: ScriptedActor(error_rate=0.1),
             study=self.study, replay_spec=self.spec)
         self.assertEqual(evidence["v"], "?")
-        self.assertFalse(evidence["confirmation"])
+        self.assertEqual(len(evidence["pairs"]), self.spec.replay_pairs)
+        self.assertEqual(evidence["reason"], "replay_contains_error_or_invalid_repair")
         trace = copy.deepcopy(self.trace)
         trace["episode"]["capabilities"]["environment"]["restore_certified"] = False
         trace["trace_hash"] = digest({k: v for k, v in trace.items() if k != "trace_hash"})
@@ -113,11 +127,11 @@ class EvidenceTests(unittest.TestCase):
 
     def test_cost_bounds_are_registered_not_observed(self):
         with self.assertRaises(ValueError):
-            score_bounds(StudySpec(inference_weights={"api_cost": 1}), ReplaySpec())
+            score_bounds(StudySpec(inference_weights={"api_cost": 1}), ReplaySpec(replay_pairs=1))
         lower, upper = score_bounds(StudySpec(max_steps=4, max_model_calls=4), self.spec)
         self.assertEqual((lower, upper), (-0.04, 1.0))
 
-    def test_actual_model_or_fingerprint_drift_rejects_confirmation(self):
+    def test_actual_model_or_fingerprint_drift_rejects_replay(self):
         for field, value in (("model", "different-served-model"), ("fingerprint", "different-build")):
             with self.subTest(field=field):
                 count = 0
@@ -127,13 +141,12 @@ class EvidenceTests(unittest.TestCase):
                 def factory():
                     nonlocal count
                     count += 1
-                    return ScriptedActor() if count <= self.spec.screening_pairs * 2 else DriftActor()
+                    return ScriptedActor() if count <= 2 else DriftActor()
                 evidence = verify_candidate(self.candidate, self.trace,
                     lambda: PreparationEnvironment(task_id="source-a"), factory,
                     study=self.study, replay_spec=self.spec)
                 self.assertEqual(evidence["v"], "?")
-                self.assertTrue(evidence["screening_passed"])
-                self.assertEqual(len(evidence["confirmation"]), self.spec.confirmation_pairs)
+                self.assertEqual(len(evidence["pairs"]), self.spec.replay_pairs)
 
     def test_missing_fingerprint_is_unknown_not_certified(self):
         trace = copy.deepcopy(self.trace)
@@ -151,11 +164,11 @@ class EvidenceTests(unittest.TestCase):
 
     def test_response_identity_is_recomputed_when_reading_evidence(self):
         evidence = self.evidence()
-        row = evidence["confirmation"][0]
+        row = evidence["pairs"][0]
         row["arms"]["corrected"]["steps"][1]["actor_response"]["fingerprint"] = "changed"
         row["record_hash"] = digest({k: v for k, v in row.items() if k != "record_hash"})
         with self.assertRaises(ValueError):
-            evaluate_evidence(evidence["plan"], evidence["screening"], evidence["confirmation"])
+            evaluate_evidence(evidence["plan"], evidence["pairs"])
 
 
 if __name__ == "__main__":

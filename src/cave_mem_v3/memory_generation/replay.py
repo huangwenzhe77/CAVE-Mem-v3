@@ -1,4 +1,4 @@
-"""Independent source action-repair confirmation for proposal equation (6).
+"""Fixed-K source action-repair confirmation for proposal equation (6).
 
 The inference is conditional on one source checkpoint and its declared replay
 randomness; repeated seeds do not create independent source tasks.
@@ -19,20 +19,13 @@ from cave_mem_v3.common.contracts import StudySpec, canonical, digest, finite, p
 
 @dataclass(frozen=True)
 class ReplaySpec:
-    screening_pairs: int = 4
-    confirmation_pairs: int = 32
-    confidence: float = 0.95
+    replay_pairs: int
     acceptance_epsilon: float = 0.0
-    family_size: int = 1
     cost_upper_bounds: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        for name in ("screening_pairs", "confirmation_pairs", "family_size"):
-            value = getattr(self, name)
-            if type(value) is not int or value < 1:
-                raise ValueError(f"{name} must be a positive integer")
-        if not 0 < finite(self.confidence, "confidence") < 1:
-            raise ValueError("confidence must be inside (0,1)")
+        if type(self.replay_pairs) is not int or self.replay_pairs < 1:
+            raise ValueError("replay_pairs must be a positive integer")
         finite(self.acceptance_epsilon, "acceptance_epsilon", minimum=0)
         object.__setattr__(self, "cost_upper_bounds", copy.deepcopy(self.cost_upper_bounds))
         for name, value in self.cost_upper_bounds.items():
@@ -55,8 +48,8 @@ def score_bounds(study: StudySpec, spec: ReplaySpec) -> tuple[float, float]:
     return -penalty, 1.0
 
 
-def _seed(study: StudySpec, candidate: dict, cohort: str, replicate: int) -> int:
-    return stage_seed(study.base_seed, candidate["candidate_hash"], replicate, "source:" + cohort)
+def _seed(study: StudySpec, candidate: dict, replicate: int) -> int:
+    return stage_seed(study.base_seed, candidate["candidate_hash"], replicate, "source-replay")
 
 
 def episode_response_identity(episode: dict) -> dict:
@@ -118,12 +111,10 @@ def make_plan(candidate: dict, trace: dict, study: StudySpec, spec: ReplaySpec) 
     source_response_identity = episode_response_identity(episode)
     if source_response_identity["model"] is None:
         raise ValueError("historical source must record the actor's actual response identity")
-    schedule = {cohort: [_seed(study, candidate, cohort, i) for i in range(count)]
-                for cohort, count in (("screening", spec.screening_pairs), ("confirmation", spec.confirmation_pairs))}
-    all_seeds = schedule["screening"] + schedule["confirmation"]
-    if len(set(all_seeds)) != len(all_seeds):
+    schedule = [_seed(study, candidate, i) for i in range(spec.replay_pairs)]
+    if len(set(schedule)) != len(schedule):
         raise ValueError("replay seed collision; choose another base seed before collection")
-    plan = {"schema_version": "source-replay-plan.v3", "candidate": copy.deepcopy(candidate),
+    plan = {"schema_version": "source-replay-plan.v5", "candidate": copy.deepcopy(candidate),
             "source_trace_hash": trace["trace_hash"], "study": plain(study), "replay_spec": plain(spec),
             "actor_config": episode["actor_config"], "environment_config": episode["environment_config"],
             "capabilities": capabilities, "score_bounds": list(score_bounds(study, spec)),
@@ -135,14 +126,14 @@ def make_plan(candidate: dict, trace: dict, study: StudySpec, spec: ReplaySpec) 
 
 
 def _collect_pair(plan: dict, checkpoint: dict, env_factory: Callable, actor_factory: Callable,
-                  cohort: str, replicate: int, episode_runner: Callable) -> dict:
+                  replicate: int, episode_runner: Callable) -> dict:
     study = StudySpec(**plan["study"])
     candidate = plan["candidate"]
-    seed = plan["schedule"][cohort][replicate]
-    row = {"schema_version": "source-replay-pair.v3", "plan_hash": plan["plan_hash"],
+    seed = plan["schedule"][replicate]
+    row = {"schema_version": "source-replay-pair.v5", "plan_hash": plan["plan_hash"],
            "candidate_hash": candidate["candidate_hash"], "checkpoint_hash": candidate["checkpoint_hash"],
-           "cohort": cohort, "replicate": replicate, "seed": seed,
-           "sample_id": digest([plan["plan_hash"], cohort, replicate, seed]), "arms": {}, "valid": False}
+           "replicate": replicate, "seed": seed,
+           "sample_id": digest([plan["plan_hash"], replicate, seed]), "arms": {}, "valid": False}
     order = ["original", "corrected"]
     random.Random(stage_seed(seed, plan["plan_hash"], replicate, "arm_order")).shuffle(order)
     row["arm_order"] = order
@@ -198,22 +189,22 @@ def _collect_pair(plan: dict, checkpoint: dict, env_factory: Callable, actor_fac
     return row
 
 
-def _check_records(rows: list[dict], plan: dict, cohort: str) -> tuple[list[float], bool]:
+def _check_records(rows: list[dict], plan: dict) -> tuple[list[float], bool]:
     spec = ReplaySpec(**plan["replay_spec"])
     study = StudySpec(**plan["study"])
     candidate = plan["candidate"]
     lower, upper = score_bounds(study, spec)
     differences, usable = [], True
-    if len(rows) > len(plan["schedule"][cohort]):
+    if len(rows) > len(plan["schedule"]):
         raise ValueError("more replay records than preregistered samples")
     for index, row in enumerate(rows):
         if row.get("record_hash") != digest({k: v for k, v in row.items() if k != "record_hash"}):
             raise ValueError("source replay record checksum mismatch")
-        seed = plan["schedule"][cohort][index]
-        expected = {"schema_version": "source-replay-pair.v3", "plan_hash": plan["plan_hash"],
+        seed = plan["schedule"][index]
+        expected = {"schema_version": "source-replay-pair.v5", "plan_hash": plan["plan_hash"],
                     "candidate_hash": candidate["candidate_hash"], "checkpoint_hash": candidate["checkpoint_hash"],
-                    "cohort": cohort, "replicate": index, "seed": seed,
-                    "sample_id": digest([plan["plan_hash"], cohort, index, seed])}
+                    "replicate": index, "seed": seed,
+                    "sample_id": digest([plan["plan_hash"], index, seed])}
         if any(row.get(key) != value for key, value in expected.items()):
             raise ValueError("source replay sample identity/order/protocol mismatch")
         if set(row.get("arms", {})) != {"original", "corrected"} or sorted(row.get("arm_order", [])) != ["corrected", "original"]:
@@ -266,65 +257,53 @@ def _check_records(rows: list[dict], plan: dict, cohort: str) -> tuple[list[floa
     return differences, usable
 
 
-def evaluate_evidence(plan: dict, screening: list[dict], confirmation: list[dict]) -> dict:
-    """Recompute statistics from all preplanned attempts, without discarding errors."""
+def evaluate_evidence(plan: dict, pairs: list[dict]) -> dict:
+    """Recompute fixed-K statistics from every planned pair, preserving errors."""
+    if plan.get("schema_version") != "source-replay-plan.v5":
+        raise ValueError("unsupported source replay plan")
     if plan.get("plan_hash") != digest({k: v for k, v in plan.items() if k != "plan_hash"}):
         raise ValueError("source replay plan checksum mismatch")
     study, spec = StudySpec(**plan["study"]), ReplaySpec(**plan["replay_spec"])
-    expected_schedule = {cohort: [_seed(study, plan["candidate"], cohort, i) for i in range(count)]
-                         for cohort, count in (("screening", spec.screening_pairs), ("confirmation", spec.confirmation_pairs))}
+    expected_schedule = [_seed(study, plan["candidate"], i) for i in range(spec.replay_pairs)]
     if plan.get("schedule") != expected_schedule or plan.get("score_bounds") != list(score_bounds(study, spec)):
         raise ValueError("replay plan schedule or bounded utility changed")
-    seeds = expected_schedule["screening"] + expected_schedule["confirmation"]
-    if len(seeds) != len(set(seeds)):
-        raise ValueError("screening and confirmation must use unique nonoverlapping seeds")
-    screen_d, screen_valid = _check_records(screening, plan, "screening")
-    confirm_d, confirm_valid = _check_records(confirmation, plan, "confirmation")
+    if len(expected_schedule) != len(set(expected_schedule)):
+        raise ValueError("replay schedule contains duplicate seeds")
+    differences, all_valid = _check_records(pairs, plan)
     identities = [plan["source_response_identity"]]
     identities.extend(episode_response_identity(arm)
-                      for row in [*screening, *confirmation] for arm in row["arms"].values()
+                      for row in pairs for arm in row["arms"].values()
                       if arm.get("status") != "error")
     fingerprints = {identity["fingerprint"] for identity in identities if identity["fingerprint"] is not None}
     if len(fingerprints) > 1:
-        raise ValueError("served actor fingerprint changed across source replay cohorts")
+        raise ValueError("served actor fingerprint changed across source replay pairs")
     identity_audit = {"source": copy.deepcopy(plan["source_response_identity"]),
                       "observed_fingerprints": sorted(fingerprints),
                       "fingerprint_status": "unknown" if any(identity["model"] is not None and identity["fingerprint_status"] == "unknown"
                                                                for identity in identities) else "reported",
                       "limitation": "reported model/fingerprint checks do not certify remote weights or seed coupling"}
-    screening_passed = (len(screening) == spec.screening_pairs and screen_valid and mean(screen_d) > spec.acceptance_epsilon)
-    if confirmation and not screening_passed:
-        raise ValueError("confirmation occurred without the registered screening gate passing")
-    report = {"schema_version": "source-evidence.v3", "plan": copy.deepcopy(plan),
-              "screening": copy.deepcopy(screening), "confirmation": copy.deepcopy(confirmation),
-              "screening_passed": screening_passed, "n_confirmation": len(confirmation),
-              "n_usable_confirmation": len(confirm_d), "v": "?", "reason": "incomplete_confirmation",
-              "mean_difference": None, "lower_bound": None, "upper_bound": None,
+    report = {"schema_version": "source-evidence.v5", "plan": copy.deepcopy(plan),
+              "pairs": copy.deepcopy(pairs), "n_replay_pairs": len(pairs),
+              "n_usable_pairs": len(differences), "v": "?", "reason": "incomplete_replay",
+              "mean_difference": None, "decision_rule": "complete_valid_pairs_and_mean_difference_gt_acceptance_epsilon",
               "endpoint": "terminal_utility", "scope": plan["scope"],
               "response_identity_audit": identity_audit,
               "claim_boundary": "source_checkpoint_action_repair_only;mechanism_and_target_reminder_effect_unproven",
-              "independent_source_tasks": 1,
-              "interval_assumptions": "bounded utility;independent replicate randomness conditional on source checkpoint;declared provider coupling"}
-    if not screening_passed:
-        report["reason"] = "screening_rejected" if screen_valid and len(screening) == spec.screening_pairs else "screening_incomplete_or_error"
-    elif not confirm_valid:
-        report["reason"] = "confirmation_contains_error_or_invalid_repair"
-    elif len(confirmation) == spec.confirmation_pairs:
-        width = plan["score_bounds"][1] - plan["score_bounds"][0]
-        alpha = (1.0 - spec.confidence) / spec.family_size
-        radius = width * math.sqrt(2.0 * math.log(2.0 / alpha) / len(confirm_d))
-        average = mean(confirm_d)
-        lower, upper = max(-width, average - radius), min(width, average + radius)
-        passed = lower > spec.acceptance_epsilon
-        report.update(mean_difference=average, lower_bound=lower, upper_bound=upper,
+              "independent_source_tasks": 1}
+    if len(pairs) == spec.replay_pairs and all_valid:
+        average = mean(differences)
+        passed = average > spec.acceptance_epsilon
+        report.update(mean_difference=average,
                       v=1 if passed else 0,
                       reason="supported_source_repair" if passed else "improvement_not_supported")
+    elif len(pairs) == spec.replay_pairs:
+        report["reason"] = "replay_contains_error_or_invalid_repair"
     report["evidence_hash"] = digest(report)
     return report
 
 
 def validate_evidence(evidence: dict, *, candidate: dict | None = None, trace: dict | None = None) -> dict:
-    if evidence.get("schema_version") != "source-evidence.v3":
+    if evidence.get("schema_version") != "source-evidence.v5":
         raise ValueError("unsupported source evidence")
     plan = evidence["plan"]
     if candidate is not None and canonical(candidate) != canonical(plan["candidate"]):
@@ -333,7 +312,7 @@ def validate_evidence(evidence: dict, *, candidate: dict | None = None, trace: d
         expected = make_plan(plan["candidate"], trace, StudySpec(**plan["study"]), ReplaySpec(**plan["replay_spec"]))
         if canonical(plan) != canonical(expected):
             raise ValueError("source evidence plan differs from its provenance")
-    recomputed = evaluate_evidence(plan, evidence["screening"], evidence["confirmation"])
+    recomputed = evaluate_evidence(plan, evidence["pairs"])
     if canonical(recomputed) != canonical(evidence):
         raise ValueError("source evidence statistics or checksum changed")
     return {"v": evidence["v"], "reason": evidence["reason"], "scope": evidence["scope"]}
@@ -342,7 +321,7 @@ def validate_evidence(evidence: dict, *, candidate: dict | None = None, trace: d
 def verify_candidate(candidate: dict, trace: dict, env_factory: Callable, actor_factory: Callable, *,
                      study: StudySpec, replay_spec: ReplaySpec, output_dir: str | Path | None = None,
                      episode_runner: Callable | None = None) -> dict:
-    """Run fixed screening then independent fixed confirmation. Never retry errors."""
+    """Run exactly K preregistered source replay pairs. Never retry errors."""
     if episode_runner is None:
         from cave_mem_v3.agents.runtime import run_episode
         episode_runner = run_episode
@@ -352,17 +331,13 @@ def verify_candidate(candidate: dict, trace: dict, env_factory: Callable, actor_
         output.mkdir(parents=True, exist_ok=False)
         write_json(output / "plan.json", plan)
     checkpoint = copy.deepcopy(trace["episode"]["steps"][candidate["step_index"]]["checkpoint"])
-    screening, confirmation = [], []
-    for cohort, count, rows in (("screening", replay_spec.screening_pairs, screening),
-                                ("confirmation", replay_spec.confirmation_pairs, confirmation)):
-        if cohort == "confirmation" and not evaluate_evidence(plan, screening, [])["screening_passed"]:
-            break
-        for index in range(count):
-            row = _collect_pair(plan, checkpoint, env_factory, actor_factory, cohort, index, episode_runner)
-            rows.append(row)
-            if output is not None:
-                write_json(output / cohort / f"{index:06d}.json", row)
-    evidence = evaluate_evidence(plan, screening, confirmation)
+    pairs = []
+    for index in range(replay_spec.replay_pairs):
+        row = _collect_pair(plan, checkpoint, env_factory, actor_factory, index, episode_runner)
+        pairs.append(row)
+        if output is not None:
+            write_json(output / "pairs" / f"{index:06d}.json", row)
+    evidence = evaluate_evidence(plan, pairs)
     if output is not None:
         # The plan on disk is part of the audit trail and may not be rewritten.
         if canonical(read_json(output / "plan.json")) != canonical(plan):
