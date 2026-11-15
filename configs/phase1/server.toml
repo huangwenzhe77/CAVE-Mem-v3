@@ -2,8 +2,8 @@
 [study]
 study_id = "phase1-source-pilot"
 base_seed = 42
-max_steps = 6
-max_model_calls = 6
+max_steps = 20
+max_model_calls = 20
 # Pilot utility: one-hundredth per model call.
 lambda_inference = 0.01
 lambda_tool = 0.0
@@ -51,8 +51,6 @@ runs_per_task = 1
 max_runs = 3
 
 [verification]
-confidence = 0.95
 acceptance_epsilon = 0.0
-screening_pairs = 1
-confirmation_pairs = 2
-# Formal verification defaults remain distinct from the pilot's two-pair gate.
+replay_pairs = 2
+# Engineering smoke settings; freeze a separately justified protocol for research claims.

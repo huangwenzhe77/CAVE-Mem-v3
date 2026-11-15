@@ -48,7 +48,7 @@ def readiness(raw: dict) -> dict:
     for key in required:
         if type(collection.get(key)) is not int or collection[key] <= 0:
             pending.append("collection." + key)
-    for key in ("screening_pairs", "confirmation_pairs"):
+    for key in ("replay_pairs",):
         if type(raw["verification"].get(key)) is not int or raw["verification"][key] <= 0:
             pending.append("verification." + key)
     local_path = raw["actor"].get("local_model_path")

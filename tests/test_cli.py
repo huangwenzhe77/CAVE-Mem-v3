@@ -46,19 +46,21 @@ class CommandTests(unittest.TestCase):
                              exclusion_conditions=[{"field": "prepared", "equals": True}],
                              scope="deterministic development fixture only", proposed_by="fixture-test")
             write_json(candidates, raw)
-            unset = root / "unset-confirmation.toml"
-            unset.write_text(config.read_text().replace("confirmation_pairs = 16\n", ""))
+            unset = root / "unset-replay-k.toml"
+            unset.write_text(config.read_text().replace("replay_pairs = 2\n", ""))
             error = self.invoke("verify", "--config", unset, "--manifest", manifest,
                                 "--collection", collection, "--candidates", candidates,
                                 "--output", root / "not-started", expected=2)
-            self.assertIn("confirmation_pairs", error)
+            self.assertIn("replay_pairs", error)
             self.assertFalse((root / "not-started").exists())
             verification = root / "verification"
             self.invoke("verify", "--config", config, "--manifest", manifest, "--collection", collection,
                         "--candidates", candidates, "--output", verification)
             records = read_json(verification / "verification.json")["records"]
             self.assertTrue(all(record["evidence"]["v"] == 1 for record in records))
-            self.assertTrue(all(record["evidence"]["plan"]["replay_spec"]["family_size"] == 2 for record in records))
+            self.assertTrue(all(record["evidence"]["plan"]["replay_spec"]["replay_pairs"] == 2 for record in records))
+            automatic_bank = load_bank(verification / "bank.json")
+            self.assertEqual(automatic_bank["memory_count"], 2)
             bank_path = root / "bank.json"
             result = self.invoke("bank", "--verification", verification, "--output", bank_path)
             self.assertEqual(result["verified_memories"], 2)

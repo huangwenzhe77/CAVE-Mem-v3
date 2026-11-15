@@ -253,12 +253,9 @@ def _verify(args):
         raise ValueError("source collection and verification manifest differ")
     spec = StudySpec(**raw["study"])
     verification_config = copy.deepcopy(raw["verification"])
-    for key in ("screening_pairs", "confirmation_pairs"):
+    for key in ("replay_pairs",):
         if key not in verification_config:
             raise ValueError(f"set verification.{key} explicitly before source replay")
-    if verification_config.get("family_size", len(candidates)) < len(candidates):
-        raise ValueError("verification.family_size cannot be smaller than the frozen candidate batch")
-    verification_config.setdefault("family_size", len(candidates))
     replay_spec = ReplaySpec(**verification_config)
     actor = _actor(raw)
     factory = _env_factory(raw, manifest)
@@ -283,7 +280,20 @@ def _verify(args):
         write_json(output / "verification.json", {"schema_version": "source-verification-run.v3",
             "manifest_hash": manifest["manifest_hash"], "records": records,
             "planned_candidates": len(candidates), "complete": len(records) == len(candidates)})
-    return {"output": str(output.resolve()), "candidate_count": len(records)}
+    from cave_mem_v3.memory_generation.bank import build_memory, freeze_bank
+    memories = [build_memory(record["candidate"], by_trace[record["candidate"]["source_trace_id"]],
+                             record["evidence"])
+                for record in records if record["evidence"].get("v") == 1]
+    bank_path = output / "bank.json" if memories else None
+    if bank_path is not None:
+        verification = read_json(output / "verification.json")
+        freeze_bank(memories, bank_path, source_traces=traces,
+                    metadata={"manifest_hash": manifest["manifest_hash"],
+                              "verification_hash": digest(verification),
+                              "excluded_candidates": [record["candidate"]["candidate_hash"]
+                                  for record in records if record["evidence"].get("v") != 1]})
+    return {"output": str(output.resolve()), "candidate_count": len(records),
+            "verified_memories": len(memories), "bank": str(bank_path.resolve()) if bank_path else None}
 
 
 def _bank(args):

@@ -1,5 +1,26 @@
 # 变更记录
 
+## 2026-11-15 — K=2、20 步工程试跑协议
+
+- `configs/phase1/server.toml`：历史轨迹和来源回放的 actor 预算均设为最多 20 步/20 次模型调用，K 保持 2；这一配置只用于新的工程 run，不能复用旧 6 步来源轨迹。
+- `configs/phase1/demo.toml`：fixture 环境保留 4 步预算，配对回放改为 K=2，使完整软件流程更快完成。
+- `src/cave_mem_v3/cli.py`、`tests/test_cli.py`：移除置信区间的候选家族参数注入，并按 K=2 检验端到端入库。
+- `docs/phase1.md`、`docs/experiment_design.md`：明确工程 pilot 在全部 K 组有效后按平均效用差超过阈值赋 `v=1`；区别旧 r3 pilot 产物与正式研究证据，修正运行产物和预算说明。
+- `src/cave_mem_v3/memory_generation/replay.py`、`src/cave_mem_v3/memory_generation/bank.py`、`tests/test_evidence.py`：另由回放实现 agent 修改，去掉置信区间入库门槛并保持来源恢复和异常校验。
+
+历史 pilot 产物保持原样；新设置必须使用新的 run 名和冻结计划。
+
+## 2026-11-15 — 第一阶段固定 K 回放
+
+- `src/cave_mem_v3/memory_generation/replay.py`：移除筛选/确认双队列，改为每个冻结候选完整执行配置指定的 K 组配对回放；所有尝试保留，完成后按全部 K 组重算效用差置信区间。证据与计划 schema 升为 v4，只有下界超过 `acceptance_epsilon` 才标记 `v=1`。
+- `src/cave_mem_v3/common/config.py`、`src/cave_mem_v3/cli.py`：要求显式设置 `verification.replay_pairs`，移除旧双阶段参数校验；整批 K 回放完成后自动将所有 `v=1` 项冻结到 verification 输出目录的 `bank.json`。
+- `src/cave_mem_v3/memory_generation/bank.py`：记忆质量记录 K 对回放数；现有正式 `bank` 命令仍只冻结 `v=1` 候选。
+- `configs/phase1/demo.toml`、`configs/phase1/server.toml`：改为单一 `replay_pairs` 参数；demo 使用 K=16，H20 配置中的 K=2 明确仅为工程 pilot，正式 K 尚待冻结。
+- `tests/test_evidence.py`、`tests/test_cli.py`：覆盖固定 K 完整运行、缺对/重复对拒绝、错误保留、置信阈值入库及配置缺项。
+- `docs/phase1.md`、`docs/experiment_design.md`：说明教师查看完整公开轨迹并提出检查点/修正假说；K 次回放过阈值后自动入正式库；明确 proposal 未指定 K，也未规定筛选/确认拆分。将旧 `pilot-provisional-bank.v1` 描述为历史工程产物。
+
+当前正式 K、成本权重、接受阈值与任务范围审计仍需在正式来源实验前冻结；本次代码改动不把 H20 的 K=2 pilot 升格为正式研究证据。
+
 ## 2026-11-14 — H20 Terminal-Bench 工程 pilot
 
 ### 失败归因复核及新一轮采集
