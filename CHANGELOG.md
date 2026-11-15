@@ -1,5 +1,63 @@
 # 变更记录
 
+## 2026-11-15 — S2-02 不可配对目标的随机单臂采集
+
+在 `ee97ac12d4e43d4f168e6ce2acb5f2196c1a56f5` 基础上使用分支 `codex/s2-single-arm`；两名实现 agent、一名独立审核 agent 协作，主 agent 集成验证。保留开始前所有未提交改动；未提交或推送。本条只列 S2-02 相对开始时工作区的新增/修改。
+
+| 文件 | 本轮改动 |
+| --- | --- |
+| `src/cave_mem_v3/interventions/single.py` | 新增在线前缀采集，在活会话中先冻结 a0/x 再随机分配一臂；记录严格正概率与独立种子、写前事件链、排除/失败/pending；冻结身份漂移及清理错误停止整批，完成后重入不构建工厂或调用模型 |
+| `src/cave_mem_v3/interventions/execution.py` | 新增 `run_live_target_arm`，复用 Silent 缓存动作、Remind 单次提醒与相同普通续跑预算；活会话不调用快照、恢复或状态指纹，原配对路径的恢复要求保留 |
+| `src/cave_mem_v3/interventions/single_outcomes.py` | 新增只读原始日志校验和观测结果汇总；重核输入/分配/成本/终局、跨任务模型身份及停止顺序；费用未知不生成效用，单臂不生成 D/H/rescue |
+| `src/cave_mem_v3/cli.py` | 新增 `collect-single-target` 与 `summarize-target-single`；显式要求分配概率，仅接收 target_train，pending 返回非零 |
+| `examples/phase2_single_demo.py` | 新增离线来源验证到在线单臂的完整示例；环境不暴露 snapshot/restore/state_fingerprint，已有产物不能覆盖 |
+| `tests/test_single_execution.py` | 新增 16 项执行与编排测试，覆盖两种臂、缓存动作、单次提醒、不可恢复环境、采样失败、未知完成、跨任务配置/身份漂移、零工厂重入 |
+| `tests/test_target_single_cli.py` | 新增 15 项 CLI/汇总测试，覆盖正概率、分区、未知费用、排除分母、重封后不一致记录、共享错误停止边界及离线示例 |
+| `AGENTS.md` | 持久化用户要求：后续代码任务由两名实现 agent 和一名独立审核 agent 协作，分配文件所有权 |
+| `README.md` | 更新第二部分两条采集路径、单臂命令、概率含义、未知结果和适配边界 |
+| `docs/experiment_design.md` | 同步配对/单臂软件状态，区分单臂分配概率与配对执行顺序概率，明确统计估计和训练尚未实现 |
+| `docs/task_cards.md` | 新增并完成 S2-02 的 Goal/Context/Rules/Acceptance 与执行记录；保留旧细分卡为历史参考 |
+| `CHANGELOG.md` | 本条逐文件交付、验证、实际输出和限制 |
+
+验证：最终 31 项单臂针对性测试通过；`python scripts/run_tests.py` 共 220 项软件测试通过，`git diff --check` 通过；独立审核无剩余阻断问题。审核原始记录保存在本机临时目录 `C:/Users/260917-1/AppData/Local/Temp/cave-mem-v3-s2-02/review.txt`。本轮没有修改来源入库或配对结果定义。
+
+运行 `python examples/phase2_single_demo.py --output runs/s2-02-fixture-20261115`：fixture actor/encoder，seed=42，最多 4 步/4 次模型调用，来源 K=2，检查点 hazard=0.99，`P(Remind)=0.5`，模型调用成本权重 0.01。计划并完成 1 个 target rollout，仅分配 Remind，实际观察成功、效用 0.96；共享准备与实际分支合计 4 次脚本 actor 调用、3 次工具动作、0 次外部模型请求。准备消耗 1 次调用，分支最多使用 1 次提醒重提及 2 次普通续跑。输出包含分配概率 0.5 和单独的检查点纳入概率 0.99。主 agent 重新只读汇总与保存摘要完全一致，并核对没有任何文件被改写。
+
+限制：以上均为离线软件测试/示例，不证明提醒的真实收益或个体因果效果。当前仅接收 target_train 与同一完整 manifest 的 history 来源新 v6、K=2 库；真实 Terminal 仍限于已审核的文件系统协议，不自动支持任意不可恢复后端。无记忆/预算不足是不随机化的排除，保留成本及未知终局；pending 不自动重试，单臂不构造配对伤害标签。第二部分真实实验和自然/四格覆盖尚未完成；统计估计、策略训练、部署及 Inspect 均未实现。本轮只完成 S2-02 并停止。
+
+## 2026-11-15 — S2-01 可恢复目标配对软件闭环
+
+在 `ee97ac12d4e43d4f168e6ce2acb5f2196c1a56f5` 基础上使用分支 `codex/s2-paired-experiments`；两名实现 agent、一名独立审核 agent 协作。保留开始前所有未提交改动，未提交或推送代码。以下仅列本任务相对开始时工作区的新增/修改，不把已有采样、检索实现记作本轮新工作。
+
+| 文件 | 本轮改动 |
+| --- | --- |
+| `src/cave_mem_v3/memory_generation/replay.py` | v6 来源规则要求所有修正成功及平均效用差超阈值；v5 保持原语义；目标入口检查新规则 K=2 |
+| `src/cave_mem_v3/agents/runtime.py` | 修复选中检查点剩余步数重复扣减 |
+| `src/cave_mem_v3/agents/providers.py` | target 专用瞬时提醒入口；source 入口仍拒绝提醒 |
+| `src/cave_mem_v3/target_data/collection.py` | 冻结 exposure_rules 内容，供后续校验 |
+| `src/cave_mem_v3/interventions/__init__.py` | 新目标干预模块 |
+| `src/cave_mem_v3/interventions/inputs.py` | 读取 prepared，绑定来源/目标分区，重核采样、状态、预算和共享成本，保留排除分母 |
+| `src/cave_mem_v3/interventions/reminder.py` | 从公开来源字段生成确定性、长度受限提醒 |
+| `src/cave_mem_v3/interventions/execution.py` | Silent 缓存动作、Remind 单次重提、相同普通续跑预算、成本分项、异常及 pending |
+| `src/cave_mem_v3/interventions/collection.py` | 实际检查点恢复/隔离审核、冻结随机顺序、独立实例、不可覆盖尝试/结果及事件链 |
+| `src/cave_mem_v3/interventions/outcomes.py` | 只读验证原始事件，重算 D/H/rescue、部署费用及实验实际费用；未知结局/成本不补造 |
+| `src/cave_mem_v3/cli.py` | `pair-target` 与 `summarize-target-pairs` 命令；pending 返回非零 |
+| `examples/phase2_demo.py` | 无网络的来源验证 → prepared → paired 完整示例，拒绝覆盖 |
+| `tests/test_evidence.py` | 新规则、旧证据兼容、通用 K 与目标 K=2 测试 |
+| `tests/test_runtime.py` | 多种检查点位置与预算回归测试 |
+| `tests/test_target_pair_inputs.py` | 分区、来源、预算、费用和重封后不一致输入测试 |
+| `tests/test_target_execution.py` | 提醒、缓存动作、配对种子、恢复、计时及单臂异常测试 |
+| `tests/test_target_pairs.py` | 闭环、成功/伤害/未知成本、pending、恢复运行、CLI、示例与审核回归测试 |
+| `README.md` | 更新已实现范围与运行命令 |
+| `docs/phase1.md` | 更新 v6 新规则与旧证据边界 |
+| `docs/experiment_design.md` | 同步用户确认规则及当前配对实现范围 |
+| `docs/task_cards.md` | S2-01 完成记录；原细分卡作为历史参考 |
+| `CHANGELOG.md` | 本条逐文件交付及验证记录 |
+
+验证：`python scripts/run_tests.py` 共 189 项软件测试通过，`git diff --check` 通过；独立审核无剩余阻断问题。运行 `python examples/phase2_demo.py --output runs/s2-01-fixture-20261115`，保存 1 个目标 rollout、1 对完成且有效的目标结果。配置为 fixture actor/encoder、4 步/4 次模型调用、来源 K=2、hazard=0.99、seed=42、模型调用成本权重 0.01。Silent 失败、Remind 成功，`D=0.97, H=0, rescue=1`；计入共享准备后模型调用分别为 1 和 4，整个实验实际共 4 次脚本 actor 调用（真实 API 请求为 0）。
+
+限制：以上均为软件观测，不是模型或 benchmark 结论；真实 Terminal 运行仍需冻结配置和已审核的离线文件系统协议，恢复不保证远端 RNG 完全耦合。当前只执行 target_train 的配对试点；未实现单臂、训练、部署或 Inspect。fixture 无 finalizer 时，非终局预算耗尽保留未知结局。既有规则/预算不一致的 prepared 或旧 v5 库不被自动迁移，需要新的来源/准备产物。
+
 ## 2026-11-15 — K=2、20 步工程试跑协议
 
 - `configs/phase1/server.toml`：历史轨迹和来源回放的 actor 预算均设为最多 20 步/20 次模型调用，K 保持 2；这一配置只用于新的工程 run，不能复用旧 6 步来源轨迹。

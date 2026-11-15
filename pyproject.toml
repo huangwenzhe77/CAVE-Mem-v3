@@ -9,6 +9,9 @@ description = "Replay-backed source failure memories for CAVE-Mem, proposal sect
 requires-python = ">=3.11"
 dependencies = []
 
+[project.optional-dependencies]
+encoder = ["sentence-transformers>=3,<6"]
+
 [project.scripts]
 cave3 = "cave_mem_v3.cli:main"
 

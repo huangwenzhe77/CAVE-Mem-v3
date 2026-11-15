@@ -2,11 +2,12 @@
 
 ## Current scope
 
-The repository implements phase 1 in software. The next task is an exploratory
-real-benchmark pilot: collect historical trajectories with a frozen actor,
-generate repair candidates with a teacher model, audit checkpoint restoration,
-and replay candidate repairs. Do not describe fixture tests as real results.
-Do not implement phases 2-4 unless the user explicitly requests them.
+The repository implements phase 1 and both phase 2 collection routes in software.
+The next research task is an exploratory real-benchmark source pilot: collect
+historical trajectories with a frozen actor, generate repair candidates with a
+teacher model, audit checkpoint restoration, and replay candidate repairs.
+Do not describe fixture tests as real results. Do not implement phases 3-4
+unless the user explicitly requests them.
 
 ## Research constraints
 
@@ -37,3 +38,20 @@ Do not implement phases 2-4 unless the user explicitly requests them.
 - If a task falls outside the reviewed Terminal-Bench filesystem protocol,
   report the incompatibility and propose a specific adapter or protocol change
   for review before running it.
+
+## Single-task execution workflow (2026-11-15)
+
+- For code implementation, use two coding agents and one independent review
+  agent, as explicitly requested by the user. Split file ownership to avoid
+  concurrent edits; the primary agent integrates and verifies the result.
+
+- The user's current workflow is defined in `docs/v1_plan.md` and
+  `docs/task_cards.md`. Read the selected task card before implementation.
+- Execute only one clearly identified task card per turn. State its ID,
+  verify its prerequisites, and stay within its Goal, Context, Rules, and
+  Acceptance. A request to continue selects only the next eligible card.
+- The roadmap is not authorization to implement every listed stage. Planning
+  later stages does not override the current-scope restrictions above.
+- After the selected card is complete, report every changed file, checks,
+  actual outputs, and limitations; update that card's status and stop. Do not
+  automatically start the next card. Preserve blocked and failed results.

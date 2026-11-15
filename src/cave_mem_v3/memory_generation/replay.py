@@ -17,6 +17,26 @@ from cave_mem_v3.memory_generation.candidates import checked_trace, validate_can
 from cave_mem_v3.common.contracts import StudySpec, canonical, digest, finite, plain, read_json, stage_seed, utility, write_json
 
 
+SOURCE_PLAN_SCHEMA = "source-replay-plan.v6"
+SOURCE_EVIDENCE_SCHEMA = "source-evidence.v6"
+SOURCE_DECISION_RULE = "all_corrections_success_and_positive_mean.v1"
+_LEGACY_DECISION_RULE = "complete_valid_pairs_and_mean_difference_gt_acceptance_epsilon"
+_PLAN_VERSIONS = {
+    "source-replay-plan.v5": ("source-replay-pair.v5", "source-evidence.v5", _LEGACY_DECISION_RULE),
+    SOURCE_PLAN_SCHEMA: ("source-replay-pair.v6", SOURCE_EVIDENCE_SCHEMA, SOURCE_DECISION_RULE),
+}
+
+
+def _protocol(plan: dict) -> tuple[str, str, str]:
+    try:
+        version = _PLAN_VERSIONS[plan.get("schema_version")]
+    except (KeyError, TypeError):
+        raise ValueError("unsupported source replay plan") from None
+    if plan["schema_version"] == SOURCE_PLAN_SCHEMA and plan.get("decision_rule") != SOURCE_DECISION_RULE:
+        raise ValueError("source replay decision rule differs from its schema")
+    return version
+
+
 @dataclass(frozen=True)
 class ReplaySpec:
     replay_pairs: int
@@ -99,6 +119,15 @@ def _check_source_response_identity(episode: dict, expected: dict) -> dict:
 
 
 def make_plan(candidate: dict, trace: dict, study: StudySpec, spec: ReplaySpec) -> dict:
+    """Freeze a new replay under the current all-corrections-success rule."""
+    return _make_plan(candidate, trace, study, spec, SOURCE_PLAN_SCHEMA)
+
+
+def _make_plan(candidate: dict, trace: dict, study: StudySpec, spec: ReplaySpec,
+               schema_version: str) -> dict:
+    # Legacy plans are reconstructed only for historical provenance validation.
+    if schema_version not in _PLAN_VERSIONS:
+        raise ValueError("unsupported source replay plan")
     validate_candidate(candidate, trace)
     episode = checked_trace(trace)
     if not isinstance(episode.get("actor_config"), dict) or not isinstance(episode.get("environment_config"), dict):
@@ -114,13 +143,15 @@ def make_plan(candidate: dict, trace: dict, study: StudySpec, spec: ReplaySpec) 
     schedule = [_seed(study, candidate, i) for i in range(spec.replay_pairs)]
     if len(set(schedule)) != len(schedule):
         raise ValueError("replay seed collision; choose another base seed before collection")
-    plan = {"schema_version": "source-replay-plan.v5", "candidate": copy.deepcopy(candidate),
+    plan = {"schema_version": schema_version, "candidate": copy.deepcopy(candidate),
             "source_trace_hash": trace["trace_hash"], "study": plain(study), "replay_spec": plain(spec),
             "actor_config": episode["actor_config"], "environment_config": episode["environment_config"],
             "capabilities": capabilities, "score_bounds": list(score_bounds(study, spec)),
             "source_response_identity": source_response_identity,
             "schedule": schedule, "endpoint": "terminal_utility",
             "scope": candidate["scope"], "coupling": "same_checkpoint_stage_step_seed;provider_noise_as_declared"}
+    if schema_version == SOURCE_PLAN_SCHEMA:
+        plan["decision_rule"] = SOURCE_DECISION_RULE
     plan["plan_hash"] = digest(plan)
     return plan
 
@@ -130,7 +161,7 @@ def _collect_pair(plan: dict, checkpoint: dict, env_factory: Callable, actor_fac
     study = StudySpec(**plan["study"])
     candidate = plan["candidate"]
     seed = plan["schedule"][replicate]
-    row = {"schema_version": "source-replay-pair.v5", "plan_hash": plan["plan_hash"],
+    row = {"schema_version": _protocol(plan)[0], "plan_hash": plan["plan_hash"],
            "candidate_hash": candidate["candidate_hash"], "checkpoint_hash": candidate["checkpoint_hash"],
            "replicate": replicate, "seed": seed,
            "sample_id": digest([plan["plan_hash"], replicate, seed]), "arms": {}, "valid": False}
@@ -201,7 +232,7 @@ def _check_records(rows: list[dict], plan: dict) -> tuple[list[float], bool]:
         if row.get("record_hash") != digest({k: v for k, v in row.items() if k != "record_hash"}):
             raise ValueError("source replay record checksum mismatch")
         seed = plan["schedule"][index]
-        expected = {"schema_version": "source-replay-pair.v5", "plan_hash": plan["plan_hash"],
+        expected = {"schema_version": _protocol(plan)[0], "plan_hash": plan["plan_hash"],
                     "candidate_hash": candidate["candidate_hash"], "checkpoint_hash": candidate["checkpoint_hash"],
                     "replicate": index, "seed": seed,
                     "sample_id": digest([plan["plan_hash"], index, seed])}
@@ -259,8 +290,7 @@ def _check_records(rows: list[dict], plan: dict) -> tuple[list[float], bool]:
 
 def evaluate_evidence(plan: dict, pairs: list[dict]) -> dict:
     """Recompute fixed-K statistics from every planned pair, preserving errors."""
-    if plan.get("schema_version") != "source-replay-plan.v5":
-        raise ValueError("unsupported source replay plan")
+    _, evidence_schema, decision_rule = _protocol(plan)
     if plan.get("plan_hash") != digest({k: v for k, v in plan.items() if k != "plan_hash"}):
         raise ValueError("source replay plan checksum mismatch")
     study, spec = StudySpec(**plan["study"]), ReplaySpec(**plan["replay_spec"])
@@ -282,20 +312,30 @@ def evaluate_evidence(plan: dict, pairs: list[dict]) -> dict:
                       "fingerprint_status": "unknown" if any(identity["model"] is not None and identity["fingerprint_status"] == "unknown"
                                                                for identity in identities) else "reported",
                       "limitation": "reported model/fingerprint checks do not certify remote weights or seed coupling"}
-    report = {"schema_version": "source-evidence.v5", "plan": copy.deepcopy(plan),
+    report = {"schema_version": evidence_schema, "plan": copy.deepcopy(plan),
               "pairs": copy.deepcopy(pairs), "n_replay_pairs": len(pairs),
               "n_usable_pairs": len(differences), "v": "?", "reason": "incomplete_replay",
-              "mean_difference": None, "decision_rule": "complete_valid_pairs_and_mean_difference_gt_acceptance_epsilon",
+              "mean_difference": None, "decision_rule": decision_rule,
               "endpoint": "terminal_utility", "scope": plan["scope"],
               "response_identity_audit": identity_audit,
               "claim_boundary": "source_checkpoint_action_repair_only;mechanism_and_target_reminder_effect_unproven",
               "independent_source_tasks": 1}
+    current_rule = evidence_schema == SOURCE_EVIDENCE_SCHEMA
+    if current_rule:
+        report["n_successful_corrections"] = sum(row["arms"]["corrected"].get("success") is True
+                                                  for row in pairs)
+        report["all_corrections_successful"] = None
     if len(pairs) == spec.replay_pairs and all_valid:
         average = mean(differences)
-        passed = average > spec.acceptance_epsilon
+        corrections_succeeded = all(row["arms"]["corrected"]["success"] is True for row in pairs)
+        passed = average > spec.acceptance_epsilon and (not current_rule or corrections_succeeded)
         report.update(mean_difference=average,
                       v=1 if passed else 0,
                       reason="supported_source_repair" if passed else "improvement_not_supported")
+        if current_rule:
+            report["all_corrections_successful"] = corrections_succeeded
+            if not corrections_succeeded:
+                report["reason"] = "correction_not_consistently_successful"
     elif len(pairs) == spec.replay_pairs:
         report["reason"] = "replay_contains_error_or_invalid_repair"
     report["evidence_hash"] = digest(report)
@@ -303,19 +343,40 @@ def evaluate_evidence(plan: dict, pairs: list[dict]) -> dict:
 
 
 def validate_evidence(evidence: dict, *, candidate: dict | None = None, trace: dict | None = None) -> dict:
-    if evidence.get("schema_version") != "source-evidence.v5":
+    if evidence.get("schema_version") not in ("source-evidence.v5", SOURCE_EVIDENCE_SCHEMA):
         raise ValueError("unsupported source evidence")
     plan = evidence["plan"]
+    if evidence["schema_version"] != _protocol(plan)[1]:
+        raise ValueError("source evidence and plan schema versions differ")
     if candidate is not None and canonical(candidate) != canonical(plan["candidate"]):
         raise ValueError("evidence belongs to a different repair hypothesis")
     if trace is not None:
-        expected = make_plan(plan["candidate"], trace, StudySpec(**plan["study"]), ReplaySpec(**plan["replay_spec"]))
+        expected = _make_plan(plan["candidate"], trace, StudySpec(**plan["study"]),
+                              ReplaySpec(**plan["replay_spec"]), plan["schema_version"])
         if canonical(plan) != canonical(expected):
             raise ValueError("source evidence plan differs from its provenance")
     recomputed = evaluate_evidence(plan, evidence["pairs"])
     if canonical(recomputed) != canonical(evidence):
         raise ValueError("source evidence statistics or checksum changed")
     return {"v": evidence["v"], "reason": evidence["reason"], "scope": evidence["scope"]}
+
+
+def require_current_evidence(evidence: dict, *, replay_pairs: int | None = None) -> dict:
+    """Require current successful evidence; optionally freeze a pilot's K.
+
+    Legacy evidence remains readable through validate_evidence/load_bank, but
+    cannot be silently promoted into a run requiring the new source rule.
+    """
+    result = validate_evidence(evidence)
+    if (evidence["schema_version"] != SOURCE_EVIDENCE_SCHEMA
+            or evidence["decision_rule"] != SOURCE_DECISION_RULE or result["v"] != 1):
+        raise ValueError("target memory requires current all-corrections-success evidence")
+    if replay_pairs is not None:
+        if type(replay_pairs) is not int or replay_pairs < 1:
+            raise ValueError("required replay_pairs must be a positive integer")
+        if evidence["plan"]["replay_spec"]["replay_pairs"] != replay_pairs:
+            raise ValueError("source replay count differs from the target protocol")
+    return result
 
 
 def verify_candidate(candidate: dict, trace: dict, env_factory: Callable, actor_factory: Callable, *,

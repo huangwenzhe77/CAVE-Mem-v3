@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -155,6 +156,122 @@ def _collect(args):
     _actor(raw)
     return collect_history(manifest, config, spec, _env_factory(raw, manifest),
                            lambda: _actor(raw), args.output)
+
+
+def _collect_target(args):
+    from cave_mem_v3.benchmarks.tasks import load_manifest
+    from cave_mem_v3.target_data.collection import collect_target
+    from cave_mem_v3.target_data.sampling import RiskHazard
+    raw = load_config(args.config)
+    manifest = load_manifest(args.manifest)
+    spec = StudySpec(**raw["study"])
+    _actor(raw)
+    hazard = RiskHazard(low_risk_probability=args.low_risk_probability,
+                        high_risk_probability=args.high_risk_probability)
+    return collect_target(manifest, role=args.role, spec=spec,
+                          env_factory=_env_factory(raw, manifest),
+                          actor_factory=lambda: _actor(raw),
+                          output_dir=args.output, hazard=hazard)
+
+
+def _prepare_target(args):
+    from cave_mem_v3.benchmarks.tasks import load_manifest
+    from cave_mem_v3.memory_generation.bank import load_bank
+    from cave_mem_v3.target_data.collection import collect_target
+    from cave_mem_v3.target_data.retrieval import SentenceTransformerEncoder
+    from cave_mem_v3.target_data.sampling import RiskHazard
+    from cave_mem_v3.target_data.pre_treatment_state import validate_exposure_rules
+    raw = load_config(args.config)
+    manifest = load_manifest(args.manifest)
+    spec = StudySpec(**raw["study"])
+    encoder_path = Path(args.encoder_path)
+    if not encoder_path.is_dir():
+        raise ValueError("--encoder-path must point to an existing local embedding model directory; downloads are disabled")
+    bank = load_bank(args.bank)
+    try:
+        encoder = SentenceTransformerEncoder(str(encoder_path.resolve()),
+                                             revision=args.encoder_revision,
+                                             device=args.device)
+    except RuntimeError as exc:
+        raise ValueError(str(exc)) from exc
+    exposure_rules = read_json(args.exposure_rules) if args.exposure_rules else None
+    validate_exposure_rules(exposure_rules)
+    _actor(raw)
+    hazard = RiskHazard(low_risk_probability=args.low_risk_probability,
+                        high_risk_probability=args.high_risk_probability)
+    return collect_target(
+        manifest, role=args.role, spec=spec,
+        env_factory=_env_factory(raw, manifest), actor_factory=lambda: _actor(raw),
+        output_dir=args.output, hazard=hazard, prepare_before_action=True,
+        bank=bank, encoder=encoder, exposure_rules=exposure_rules)
+
+
+def _retrieve_target(args):
+    from cave_mem_v3.target_data.retrieval import SentenceTransformerEncoder
+    from cave_mem_v3.target_data.retrieval_collection import retrieve_target_run
+    encoder_path = Path(args.encoder_path)
+    if not encoder_path.is_dir():
+        raise ValueError("--encoder-path must point to an existing local embedding model directory; downloads are disabled")
+    try:
+        encoder = SentenceTransformerEncoder(str(encoder_path.resolve()), revision=args.encoder_revision,
+                                             device=args.device)
+    except RuntimeError as exc:
+        raise ValueError(str(exc)) from exc
+    return retrieve_target_run(args.target_run, args.bank, args.output, encoder=encoder)
+
+
+def _pair_target(args):
+    from cave_mem_v3.interventions.collection import collect_target_pairs
+    from cave_mem_v3.interventions.inputs import checked
+    raw = load_config(args.config)
+    prepared = checked(read_json(Path(args.target_run) / "run.json"), "run_hash", "target-run.v1")
+    if plain(StudySpec(**raw["study"])) != prepared["study"]:
+        raise ValueError("pair-target must use the exact preparation StudySpec")
+    return collect_target_pairs(args.target_run, read_json(args.bank),
+        env_factory=_env_factory(raw, prepared["manifest"]), actor_factory=lambda: _actor(raw),
+        output_dir=args.output)
+
+
+def _summarize_target_pairs(args):
+    from cave_mem_v3.interventions.outcomes import summarize_target_pairs
+    return summarize_target_pairs(args.run)
+
+
+def _collect_single_target(args):
+    from cave_mem_v3.benchmarks.tasks import load_manifest
+    from cave_mem_v3.interventions.single import collect_single_target
+    from cave_mem_v3.target_data.pre_treatment_state import validate_exposure_rules
+    from cave_mem_v3.target_data.retrieval import SentenceTransformerEncoder
+    from cave_mem_v3.target_data.sampling import RiskHazard
+    if args.role != "target_train":
+        raise ValueError("single-arm collection requires target_train; validation/test are not supported")
+    if not math.isfinite(args.assignment_probability) or not 0 < args.assignment_probability < 1:
+        raise ValueError("assignment probability for Remind must be strictly between zero and one")
+    raw = load_config(args.config)
+    manifest = load_manifest(args.manifest, verify_assets=True)
+    spec = StudySpec(**raw["study"])
+    hazard = RiskHazard(low_risk_probability=args.low_risk_probability,
+                        high_risk_probability=args.high_risk_probability)
+    bank = read_json(args.bank)
+    exposure_rules = read_json(args.exposure_rules) if args.exposure_rules else None
+    validate_exposure_rules(exposure_rules)
+    encoder_path = Path(args.encoder_path)
+    if not encoder_path.is_dir():
+        raise ValueError("--encoder-path must point to an existing local embedding model directory; downloads are disabled")
+    try:
+        encoder = SentenceTransformerEncoder(str(encoder_path.resolve()),
+                                             revision=args.encoder_revision, device=args.device)
+    except RuntimeError as exc:
+        raise ValueError(str(exc)) from exc
+    return collect_single_target(manifest, bank=bank, role=args.role, spec=spec,
+        env_factory=_env_factory(raw, manifest), actor_factory=lambda: _actor(raw),
+        output_dir=args.output, encoder=encoder, hazard=hazard, exposure_rules=exposure_rules,
+        assignment_probability=args.assignment_probability)
+
+
+def _summarize_target_single(args):
+    from cave_mem_v3.interventions.single_outcomes import summarize_target_single
+    return summarize_target_single(args.run)
 
 
 def _candidates(args):
@@ -351,6 +468,52 @@ def main(argv=None):
     p.add_argument("--config", required=True)
     p.add_argument("--manifest", required=True)
     p.add_argument("--output", required=True)
+    p = sub.add_parser("collect-target", help="run target rollouts and select one action checkpoint per task")
+    p.add_argument("--config", required=True)
+    p.add_argument("--manifest", required=True)
+    p.add_argument("--output", required=True)
+    p.add_argument("--role", choices=("target_train", "validation"), required=True)
+    p.add_argument("--low-risk-probability", type=float, default=0.05)
+    p.add_argument("--high-risk-probability", type=float, default=0.75)
+    p = sub.add_parser("prepare-target", help="freeze pre-treatment state at the selected checkpoint before executing a0")
+    p.add_argument("--config", required=True)
+    p.add_argument("--manifest", required=True)
+    p.add_argument("--output", required=True)
+    p.add_argument("--role", choices=("target_train", "validation"), required=True)
+    p.add_argument("--bank", required=True)
+    p.add_argument("--encoder-path", required=True,
+                   help="existing local sentence-transformers model directory; no download is attempted")
+    p.add_argument("--encoder-revision", required=True)
+    p.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    p.add_argument("--exposure-rules",
+                   help="optional versioned per-memory action-exposure rules JSON; absent rules yield e=?")
+    p.add_argument("--low-risk-probability", type=float, default=0.05)
+    p.add_argument("--high-risk-probability", type=float, default=0.75)
+    p = sub.add_parser("pair-target", help="audit prepared target checkpoints and run independent Silent/Remind arms")
+    for key in ("config", "target-run", "bank", "output"):
+        p.add_argument("--" + key, required=True)
+    p = sub.add_parser("summarize-target-pairs", help="verify saved artifacts and recompute paired labels without execution")
+    p.add_argument("--run", required=True)
+    p = sub.add_parser("collect-single-target", help="freeze inputs and run one randomized arm in the same live target session")
+    for key in ("config", "manifest", "bank", "output", "encoder-path", "encoder-revision"):
+        p.add_argument("--" + key, required=True)
+    p.add_argument("--role", default="target_train", help="only target_train is supported")
+    p.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    p.add_argument("--exposure-rules", help="optional frozen action-exposure rules; absent rules preserve e=?")
+    p.add_argument("--assignment-probability", type=float, required=True,
+                   help="frozen probability of Remind; strictly between zero and one")
+    p.add_argument("--low-risk-probability", type=float, default=.05)
+    p.add_argument("--high-risk-probability", type=float, default=.75)
+    p = sub.add_parser("summarize-target-single", help="verify observed single-arm results without execution or counterfactual labels")
+    p.add_argument("--run", required=True)
+    p = sub.add_parser("retrieve-target", help="retrieve one verified memory for each selected target checkpoint")
+    p.add_argument("--target-run", required=True)
+    p.add_argument("--bank", required=True)
+    p.add_argument("--output", required=True)
+    p.add_argument("--encoder-path", required=True,
+                   help="existing local sentence-transformers model directory; no download is attempted")
+    p.add_argument("--encoder-revision", required=True)
+    p.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     p = sub.add_parser("candidates", help="write editable hypotheses or propose them with an LLM")
     p.add_argument("--collection", required=True)
     p.add_argument("--output", required=True)
@@ -371,8 +534,12 @@ def main(argv=None):
         if args.command == "check":
             result = readiness(load_config(args.config))
         else:
-            result = globals()["_" + args.command](args)
+            result = globals()["_" + args.command.replace("-", "_")](args)
         print(json.dumps(result, ensure_ascii=False, indent=2))
+        if args.command == "pair-target" and result.get("pending_pairs"):
+            return 2
+        if args.command == "collect-single-target" and result.get("pending_rollouts"):
+            return 2
         return 0
     except (ValueError, KeyError, TypeError, OSError) as exc:
         print(f"cave3: {exc}", file=sys.stderr)

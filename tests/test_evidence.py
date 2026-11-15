@@ -8,7 +8,10 @@ from cave_mem_v3.common.contracts import StudySpec, digest, read_json, write_jso
 from cave_mem_v3.environments.base import PreparationEnvironment
 from cave_mem_v3.memory_generation.bank import build_memory, freeze_bank, load_bank, validate_memory
 from cave_mem_v3.agents.providers import ScriptedActor
-from cave_mem_v3.memory_generation.replay import ReplaySpec, evaluate_evidence, score_bounds, validate_evidence, verify_candidate
+from cave_mem_v3.memory_generation.replay import (
+    SOURCE_DECISION_RULE, SOURCE_EVIDENCE_SCHEMA, SOURCE_PLAN_SCHEMA, ReplaySpec,
+    evaluate_evidence, require_current_evidence, score_bounds, validate_evidence, verify_candidate,
+)
 from cave_mem_v3.agents.runtime import run_episode
 from test_candidates import repair, source_trace
 
@@ -25,10 +28,60 @@ class EvidenceTests(unittest.TestCase):
                                 lambda: PreparationEnvironment(task_id="source-a"), ScriptedActor,
                                 study=self.study, replay_spec=self.spec, **kwargs)
 
+    def mixed_correction_outcomes(self):
+        """Inject one valid but unsuccessful continuation into a fixture pair."""
+        corrected_count = 0
+
+        class EarlyFinishActor(ScriptedActor):
+            def propose(self, *args, **kwargs):
+                response = super().propose(*args, **kwargs)
+                return replace(response, action={"type": "finish"}, text='{"type":"finish"}')
+
+        def runner(env, actor, **kwargs):
+            nonlocal corrected_count
+            if kwargs["first_action"] == {"type": "prepare"}:
+                corrected_count += 1
+                if corrected_count == 2:
+                    actor = EarlyFinishActor()
+            return run_episode(env, actor, **kwargs)
+
+        return self.evidence(episode_runner=runner)
+
+    def legacy_v5_fixture(self, evidence):
+        """Encode the same fixture observations in the historical v5 format.
+
+        Its expected decision is the old mean-only rule, including cases the
+        new rule rejects. This does not rewrite any saved experimental file.
+        """
+        old = copy.deepcopy(evidence)
+        plan = old["plan"]
+        plan["schema_version"] = "source-replay-plan.v5"
+        plan.pop("decision_rule")
+        plan["plan_hash"] = digest({k: v for k, v in plan.items() if k != "plan_hash"})
+        for row in old["pairs"]:
+            row["schema_version"] = "source-replay-pair.v5"
+            row["plan_hash"] = plan["plan_hash"]
+            row["sample_id"] = digest([plan["plan_hash"], row["replicate"], row["seed"]])
+            row["record_hash"] = digest({k: v for k, v in row.items() if k != "record_hash"})
+        old["schema_version"] = "source-evidence.v5"
+        old["decision_rule"] = "complete_valid_pairs_and_mean_difference_gt_acceptance_epsilon"
+        old.pop("n_successful_corrections")
+        old.pop("all_corrections_successful")
+        old["v"] = 1
+        old["reason"] = "supported_source_repair"
+        old["evidence_hash"] = digest({k: v for k, v in old.items() if k != "evidence_hash"})
+        return old
+
     def test_fixed_k_replay_and_bank_roundtrip(self):
         with tempfile.TemporaryDirectory() as temporary:
             evidence = self.evidence(output_dir=Path(temporary) / "replays")
             self.assertEqual(evidence["v"], 1)
+            self.assertEqual(evidence["schema_version"], SOURCE_EVIDENCE_SCHEMA)
+            self.assertEqual(evidence["plan"]["schema_version"], SOURCE_PLAN_SCHEMA)
+            self.assertEqual(evidence["decision_rule"], SOURCE_DECISION_RULE)
+            self.assertTrue(evidence["all_corrections_successful"])
+            self.assertEqual(evidence["n_successful_corrections"], 2)
+            self.assertEqual(require_current_evidence(evidence, replay_pairs=2)["v"], 1)
             self.assertEqual(evidence["mean_difference"], 0.98)
             self.assertNotIn("lower_bound", evidence)
             self.assertEqual(evidence["independent_source_tasks"], 1)
@@ -36,6 +89,7 @@ class EvidenceTests(unittest.TestCase):
             self.assertEqual(evidence["n_replay_pairs"], self.spec.replay_pairs)
             memory = build_memory(self.candidate, self.trace, evidence)
             self.assertEqual(memory.quality["mean_difference"], 0.98)
+            self.assertEqual(memory.quality["decision_rule"], SOURCE_DECISION_RULE)
             path = Path(temporary) / "bank.json"
             bank = freeze_bank([memory], path, source_traces=[self.trace])
             self.assertEqual(load_bank(path), bank)
@@ -43,6 +97,54 @@ class EvidenceTests(unittest.TestCase):
                 freeze_bank([memory], path, source_traces=[self.trace])
             with self.assertRaises(FileExistsError):
                 self.evidence(output_dir=Path(temporary) / "replays")
+
+    def test_positive_mean_does_not_replace_two_successful_corrections(self):
+        evidence = self.mixed_correction_outcomes()
+        self.assertTrue(all(pair["valid"] for pair in evidence["pairs"]))
+        self.assertGreater(evidence["mean_difference"], 0)
+        self.assertEqual(evidence["n_successful_corrections"], 1)
+        self.assertIs(evidence["all_corrections_successful"], False)
+        self.assertEqual(evidence["v"], 0)
+        self.assertEqual(evidence["reason"], "correction_not_consistently_successful")
+        with self.assertRaises(ValueError):
+            build_memory(self.candidate, self.trace, evidence)
+        with self.assertRaises(ValueError):
+            require_current_evidence(evidence, replay_pairs=2)
+
+    def test_legacy_positive_mean_evidence_stays_valid_under_its_original_rule(self):
+        legacy = self.legacy_v5_fixture(self.mixed_correction_outcomes())
+        before = copy.deepcopy(legacy)
+        self.assertEqual(validate_evidence(legacy, trace=self.trace)["v"], 1)
+        self.assertEqual(legacy, before)
+        self.assertEqual(evaluate_evidence(legacy["plan"], legacy["pairs"]), legacy)
+        memory = build_memory(self.candidate, self.trace, legacy)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "legacy-bank.json"
+            bank = freeze_bank([memory], path, source_traces=[self.trace])
+            self.assertEqual(load_bank(path), bank)
+        with self.assertRaisesRegex(ValueError, "current"):
+            require_current_evidence(legacy, replay_pairs=2)
+
+    def test_new_plan_freezes_rule_and_rejects_mixed_schema_evidence(self):
+        evidence = self.evidence()
+        changed = copy.deepcopy(evidence["plan"])
+        changed["decision_rule"] = "complete_valid_pairs_and_mean_difference_gt_acceptance_epsilon"
+        changed["plan_hash"] = digest({k: v for k, v in changed.items() if k != "plan_hash"})
+        with self.assertRaisesRegex(ValueError, "decision rule"):
+            evaluate_evidence(changed, [])
+        evidence["schema_version"] = "source-evidence.v5"
+        with self.assertRaisesRegex(ValueError, "schema versions differ"):
+            validate_evidence(evidence)
+
+    def test_new_rule_preserves_general_k_and_pilot_checks_its_own_count(self):
+        evidence = verify_candidate(self.candidate, self.trace,
+            lambda: PreparationEnvironment(task_id="source-a"), ScriptedActor,
+            study=self.study, replay_spec=ReplaySpec(replay_pairs=3))
+        self.assertEqual(evidence["n_replay_pairs"], 3)
+        self.assertEqual(evidence["n_successful_corrections"], 3)
+        self.assertEqual(require_current_evidence(evidence)["v"], 1)
+        with self.assertRaisesRegex(ValueError, "count differs"):
+            require_current_evidence(evidence, replay_pairs=2)
 
     def test_replay_labels_and_report_tampering_detected(self):
         evidence = self.evidence()

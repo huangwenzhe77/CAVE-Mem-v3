@@ -155,6 +155,84 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(trace["response_identity"],
                          {"model": None, "fingerprint": None, "fingerprint_status": "unknown"})
 
+    def test_prepare_selected_freezes_action_before_validation_or_execution(self):
+        env = PreparationEnvironment()
+        observed = []
+
+        class Selected:
+            def consider(self, **kwargs):
+                return {"status": "selected", "selected": True}
+            def finalize(self):
+                return {"status": "selected"}
+
+        def prepare_selected(**kwargs):
+            observed.append(kwargs)
+            return {"x": {"v": 1}, "randomization_status": "not_assigned",
+                    "outcome_access": "none"}
+
+        trace = run_episode(env, ScriptedActor(), spec=StudySpec(max_steps=4), seed=0,
+                            checkpoint_sampler=Selected(), prepare_selected=prepare_selected)
+
+        self.assertEqual(trace["status"], "pre_treatment_ready")
+        self.assertIsNone(trace["success"])
+        self.assertIsNone(trace["utility"])
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(trace["steps"][0]["action"], observed[0]["action"])
+        self.assertIsNone(trace["steps"][0]["result"])
+        self.assertEqual(env.snapshot()["state"]["steps"], 0)
+        self.assertNotIn("private_verifier", trace)
+        self.assertEqual(trace["steps"][0]["pre_treatment_state"]["randomization_status"],
+                         "not_assigned")
+
+    def test_prepared_remaining_steps_respect_both_caps_without_double_subtraction(self):
+        class HoldingActor(ScriptedActor):
+            def propose(self, *args, **kwargs):
+                response = super().propose(*args, **kwargs)
+                return replace(response, action={"type": "prepare"}, text='{"type":"prepare"}')
+
+        class SelectedAt:
+            def __init__(self, index):
+                self.index = index
+
+            def consider(self, **kwargs):
+                selected = kwargs["index"] == self.index
+                return {"status": "selected" if selected else "not_selected", "selected": selected}
+
+            def finalize(self):
+                return {"status": "selected"}
+
+        for prefix_steps, study_limit, env_limit, selected_index, expected in (
+            (0, 4, 4, 0, 4), (0, 4, 4, 1, 3),
+            (0, 7, 3, 1, 2), (0, 3, 7, 1, 2),
+            (1, 4, 5, 1, 3), (2, 5, 5, 1, 2),
+        ):
+            with self.subTest(prefix=prefix_steps, study=study_limit, env=env_limit,
+                              selected=selected_index):
+                env = PreparationEnvironment(max_steps=env_limit)
+                checkpoint = None
+                if prefix_steps:
+                    env.reset()
+                    for _ in range(prefix_steps):
+                        env.step({"type": "prepare"})
+                    checkpoint = env.snapshot()
+                observed = []
+
+                def prepare(**kwargs):
+                    observed.append(kwargs)
+                    return {"remaining": kwargs["remaining_computation"]}
+
+                trace = run_episode(env, HoldingActor(),
+                    spec=StudySpec(max_steps=study_limit, max_model_calls=8), seed=0,
+                    checkpoint=checkpoint, checkpoint_sampler=SelectedAt(selected_index),
+                    prepare_selected=prepare)
+                self.assertEqual(trace["status"], "pre_treatment_ready")
+                self.assertEqual(observed[0]["remaining_computation"],
+                                 {"model_calls": 8 - selected_index - 1,
+                                  "environment_steps": expected})
+                self.assertEqual(env.snapshot()["state"]["steps"], prefix_steps + selected_index)
+                self.assertIsNone(trace["steps"][-1]["result"])
+                self.assertNotIn("validation_error", trace["steps"][-1])
+
 
 if __name__ == "__main__":
     unittest.main()

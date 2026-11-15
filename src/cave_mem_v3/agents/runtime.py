@@ -20,13 +20,15 @@ def add_usage(costs, usage):
 
 
 def run_episode(env, actor, *, spec: StudySpec, seed: int, checkpoint=None,
-                first_action=None, capture_checkpoints=True) -> dict:
+                first_action=None, capture_checkpoints=True,
+                checkpoint_sampler=None, prepare_selected=None) -> dict:
     """Run within both remaining environment steps and the supplied continuation cap.
 
     first_action executes once without an actor call. Both source replay arms
-    therefore pay for the same continuation protocol. Tool/verifier errors retain
-    unknown outcomes, whereas malformed actor actions and exhausted task budgets
-    are task failures. The caller owns env.close() to preserve audit access.
+    therefore pay for the same continuation protocol. ``prepare_selected`` may
+    freeze pre-treatment inputs after the selected node's original action is
+    proposed but before validation or execution; in that mode the episode stops
+    without observing an outcome. The caller owns env.close().
     """
     started = time.perf_counter()
     costs = empty_costs()
@@ -36,6 +38,8 @@ def run_episode(env, actor, *, spec: StudySpec, seed: int, checkpoint=None,
               "response_identity": {"model": None, "fingerprint": None, "fingerprint_status": "unknown"}}
     pending_response = None
     missing_fingerprint = False
+    prior_steps = []
+    sampled_action = None
     try:
         record.update(actor_config=copy.deepcopy(actor.configuration()),
                       environment_config=copy.deepcopy(env.configuration()),
@@ -57,24 +61,34 @@ def run_episode(env, actor, *, spec: StudySpec, seed: int, checkpoint=None,
         terminal, success = env.terminal_status()
         if terminal:
             raise ValueError("cannot start a rollout at a terminal checkpoint")
+        if checkpoint_sampler is not None and not capture_checkpoints:
+            raise ValueError("checkpoint sampling requires captured checkpoint snapshots")
         calls = 0
         for index in range(min(spec.max_steps, context.remaining_steps)):
             if actor.configuration() != record["actor_config"] or env.configuration() != record["environment_config"]:
                 raise ValueError("frozen actor/environment configuration changed")
-            step = {"index": index, "context": plain(context), "checkpoint_hash": digest(env.snapshot()),
+            if not (index == 0 and first_action is not None) and calls >= spec.max_model_calls:
+                record.update(status="budget_exhausted", success=False)
+                break
+            snapshot = env.snapshot()
+            step = {"index": index, "context": plain(context), "checkpoint_hash": digest(snapshot),
                     "state_fingerprint": env.state_fingerprint(), "actor_response": None,
                     "action": None, "result": None}
             if capture_checkpoints:
-                step["checkpoint"] = copy.deepcopy(env.snapshot())
+                step["checkpoint"] = copy.deepcopy(snapshot)
             record["steps"].append(step)
+            if checkpoint_sampler is not None:
+                sampling = checkpoint_sampler.consider(
+                    context=context, checkpoint=snapshot, index=index,
+                    prior_steps=copy.deepcopy(prior_steps),
+                    checkpoint_hash=step["checkpoint_hash"])
+                step["checkpoint_sampling"] = copy.deepcopy(sampling)
+            else:
+                sampling = None
             if index == 0 and first_action is not None:
                 action = copy.deepcopy(first_action)
                 step["action_origin"] = "source_replay_override"
             else:
-                if calls >= spec.max_model_calls:
-                    record["steps"].pop()
-                    record.update(status="budget_exhausted", success=False)
-                    break
                 calls += 1
                 pending_response = actor.propose(context, stage="source_continuation" if first_action is not None else "source_collection",
                     seed=stage_seed(seed, context.task_id, 0, "actor", index), reminder=None,
@@ -107,14 +121,34 @@ def run_episode(env, actor, *, spec: StudySpec, seed: int, checkpoint=None,
                 step["action_origin"] = "actor"
                 pending_response = None
             step["action"] = action
+            if (checkpoint_sampler is not None and sampling.get("selected") is True):
+                sampled_action = copy.deepcopy(action)
+                if prepare_selected is not None:
+                    prepared = prepare_selected(
+                        context=context, checkpoint=copy.deepcopy(snapshot),
+                        action=copy.deepcopy(action), step_index=index,
+                        remaining_computation={
+                            "model_calls": max(0, spec.max_model_calls - calls),
+                            "environment_steps": max(0, min(spec.max_steps - index, context.remaining_steps)),
+                        })
+                    if not isinstance(prepared, dict):
+                        raise TypeError("prepare_selected must return a pre-treatment state mapping")
+                    step["pre_treatment_state"] = copy.deepcopy(prepared)
+                    record.update(status="pre_treatment_ready", success=None,
+                                  utility=None)
+                    break
             valid, reason = env.validate_action(action)
             if not valid:
                 step["validation_error"] = reason
                 record.update(status="invalid_action", success=False)
+                prior_steps.append({"action": copy.deepcopy(action), "valid": False,
+                                    "validation_error": reason})
                 break
             costs["tool_calls"] += 1.0
             result = env.step(action, seed=stage_seed(seed, context.task_id, 0, "environment", index))
             step["result"] = plain(result)
+            prior_steps.append({"action": copy.deepcopy(action), "result": plain(result),
+                                "valid": result.valid})
             if result.tool_cost is None or costs["tool_cost"] is None:
                 costs["tool_cost"] = None
             else:
@@ -154,6 +188,18 @@ def run_episode(env, actor, *, spec: StudySpec, seed: int, checkpoint=None,
         if record["steps"] and record["steps"][-1].get("action") is not None and record["steps"][-1].get("result") is None:
             costs["tool_cost"] = None
     finally:
+        if checkpoint_sampler is not None:
+            try:
+                sample = checkpoint_sampler.finalize()
+                if sampled_action is not None and sample.get("status") == "selected":
+                    sample["selected_action"] = sampled_action
+                record["checkpoint_sampling"] = sample
+            except Exception as exc:
+                record["checkpoint_sampling"] = {
+                    "status": "sampling_incomplete",
+                    "reason": "sampler_finalize_error",
+                    "error": {"type": type(exc).__name__, "message": str(exc)},
+                }
         costs["wall_seconds"] = time.perf_counter() - started
         if record["status"] != "error" and type(record["success"]) is bool:
             try:
@@ -162,7 +208,7 @@ def run_episode(env, actor, *, spec: StudySpec, seed: int, checkpoint=None,
                 record.update(status="error", success=None, utility=None,
                               error={"type": type(exc).__name__, "message": str(exc)})
         verifier = getattr(env, "verifier_report", None)
-        if verifier is not None:
+        if verifier is not None and record["status"] != "pre_treatment_ready":
             record["private_verifier"] = copy.deepcopy(verifier)
         record["trace_hash"] = digest(record)
     return record

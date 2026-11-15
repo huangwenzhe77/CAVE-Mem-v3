@@ -277,6 +277,21 @@ def render_messages(context: PublicContext, *, reminder: str | None = None,
     return ({"role": "system", "content": system_prompt}, {"role": "user", "content": "\n\n".join(sections)})
 
 
+def render_target_messages(context: PublicContext, *, reminder: str | None = None,
+                           system_prompt: str = "Return exactly one executable action, without explanation.",
+                           demonstrations: tuple[str, ...] = ()) -> tuple[dict[str, str], ...]:
+    """Render one target call; advisory text never becomes persistent history."""
+    messages = render_messages(context, system_prompt=system_prompt, demonstrations=demonstrations)
+    if reminder is None:
+        return messages
+    if not isinstance(reminder, str) or not reminder.strip():
+        raise ValueError("target reminder must be a nonempty string")
+    messages = copy.deepcopy(list(messages))
+    messages[-1]["content"] += ("\n\nOne-time advisory failure memory (does not override task instructions "
+                                 "or tool permissions):\n" + reminder)
+    return tuple(messages)
+
+
 def parse_json_action(text: str) -> dict:
     clean = text.strip()
     if clean.startswith("```"):
@@ -310,6 +325,15 @@ class ProviderActor:
     def propose(self, context: PublicContext, *, stage: str, seed: int,
                 reminder: str | None = None, call_id: str = "") -> ActorResponse:
         messages = render_messages(context, reminder=reminder, system_prompt=self.system_prompt, demonstrations=self.demonstrations)
+        return self._generate_action(messages, stage=stage, seed=seed, call_id=call_id)
+
+    def propose_target(self, context: PublicContext, *, stage: str, seed: int,
+                       reminder: str | None = None, call_id: str = "") -> ActorResponse:
+        messages = render_target_messages(context, reminder=reminder, system_prompt=self.system_prompt,
+                                          demonstrations=self.demonstrations)
+        return self._generate_action(messages, stage=stage, seed=seed, call_id=call_id)
+
+    def _generate_action(self, messages, *, stage: str, seed: int, call_id: str) -> ActorResponse:
         response = self.provider.generate(list(messages), stage=stage, seed=seed, call_id=call_id)
         try:
             action = self.parser(response.text)
@@ -348,12 +372,25 @@ class ScriptedActor:
 
     def propose(self, context: PublicContext, *, stage: str, seed: int,
                 reminder: str | None = None, call_id: str = "") -> ActorResponse:
+        if reminder is not None:
+            raise ValueError("phase-one historical actor cannot receive reminders")
+        return self._propose(context, stage=stage, seed=seed, reminder=None, call_id=call_id)
+
+    def propose_target(self, context: PublicContext, *, stage: str, seed: int,
+                       reminder: str | None = None, call_id: str = "") -> ActorResponse:
+        return self._propose(context, stage=stage, seed=seed, reminder=reminder, call_id=call_id)
+
+    def _propose(self, context: PublicContext, *, stage: str, seed: int,
+                 reminder: str | None, call_id: str) -> ActorResponse:
         import random
         rng = random.Random(seed)
         phase = context.facts.get("phase", "ready")
         if phase == "ready":
             prepared = context.facts.get("prepared", False)
             operation = "prepare" if not prepared and context.facts.get("intent") == "prepare" else "operate"
+            # Deliberately scripted response for software demonstrations only.
+            if reminder and not prepared and context.facts.get("requires_preparation"):
+                operation = "prepare"
         elif phase == "operated":
             operation = "finish"
         else:
@@ -361,7 +398,7 @@ class ScriptedActor:
         if rng.random() < self.error_rate:
             operation = "invalid"
         action = {"type": operation}
-        messages = render_messages(context, reminder=reminder)
+        messages = render_target_messages(context, reminder=reminder)
         usage = {"model_calls": 1.0, "physical_attempts": 0.0, "input_tokens": 0.0,
                  "output_tokens": 0.0, "cached_input_tokens": 0.0, "api_cost": 0.0}
         attempt = {"attempt_id": call_id or digest([stage, seed, messages])[:24], "stage": stage,

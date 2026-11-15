@@ -1,7 +1,9 @@
 import unittest
 
 from cave_mem_v3.common.contracts import digest
-from cave_mem_v3.target_data.sampling import RiskHazard, select_first_checkpoint
+from cave_mem_v3.target_data.sampling import (
+    OnlineCheckpointSampler, RiskHazard, select_first_checkpoint,
+)
 
 
 def step(index, observation="Workspace ready.", **extra):
@@ -17,6 +19,53 @@ def step(index, observation="Workspace ready.", **extra):
 
 
 class SequentialCheckpointSamplingTests(unittest.TestCase):
+    def test_incremental_sampler_stops_sampling_but_not_the_rollout(self):
+        sampler = OnlineCheckpointSampler(
+            role="target_train", task_id="task-a", trace_id="trace-a", seed=1,
+            hazard=RiskHazard(low_risk_probability=.5, high_risk_probability=.5))
+        first = step(0)
+        selected = sampler.consider(first["context"], first["checkpoint"], 0, [])
+        self.assertEqual(selected["status"], "selected")
+
+        # Invalid later inputs prove no further risk evaluation occurs. The
+        # caller can continue executing the rollout and simply ignore this.
+        later = sampler.consider(None, None, 1, None)
+        self.assertEqual(later["status"], "already_selected")
+        result = sampler.finalize()
+        self.assertEqual(result["selected_step_index"], 0)
+        self.assertEqual(len(result["selection_decisions"]), 1)
+
+    def test_each_rollout_gets_a_fresh_sampler(self):
+        hazard = RiskHazard(low_risk_probability=.5, high_risk_probability=.5)
+        selections = []
+        for trace_id in ("trace-a", "trace-b"):
+            sampler = OnlineCheckpointSampler(
+                role="target_train", task_id="task-a", trace_id=trace_id,
+                seed=1, hazard=hazard)
+            row = step(0)
+            selections.append(sampler.consider(row["context"], row["checkpoint"], 0, []))
+        self.assertEqual([entry["status"] for entry in selections], ["selected", "selected"])
+
+    def test_incremental_sampler_records_hazard_times_prior_survival(self):
+        sampler = OnlineCheckpointSampler(
+            role="target_train", task_id="task-a", trace_id="trace-a", seed=10,
+            hazard=RiskHazard(low_risk_probability=.5, high_risk_probability=.5))
+        for index in range(2):
+            row = step(index)
+            result = sampler.consider(row["context"], row["checkpoint"], index, [])
+        self.assertEqual(result["status"], "selected")
+        self.assertAlmostEqual(result["decision"]["conditional_inclusion_probability"], .25)
+        self.assertAlmostEqual(sampler.finalize()["inclusion_probability"], .25)
+
+    def test_incremental_sampler_marks_hash_mismatch_incomplete(self):
+        sampler = OnlineCheckpointSampler(
+            role="target_train", task_id="task-a", trace_id="trace-a", seed=0)
+        row = step(0)
+        result = sampler.consider(row["context"], row["checkpoint"], 0, [],
+                                  checkpoint_hash="wrong-hash")
+        self.assertEqual(result["status"], "sampling_incomplete")
+        self.assertEqual(sampler.finalize()["reason"], "invalid_checkpoint_event")
+
     def test_high_risk_points_have_higher_hazard_than_low_risk_points(self):
         hazard = RiskHazard()
         low = select_first_checkpoint([step(0)], role="target_train", task_id="task-a",
