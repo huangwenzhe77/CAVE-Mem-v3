@@ -1,5 +1,6 @@
 """Pure artifact verification and recomputation of paired labels and costs."""
 from __future__ import annotations
+from cave_mem_v3.target_data.partitions import target_partition, partition_tasks, validation_binding
 
 from collections import Counter
 from pathlib import Path
@@ -285,10 +286,17 @@ def summarize_target_pairs(output_dir):
     root = Path(output_dir)
     run = checked(read_json(root / "run.json"), schema="target-pair-run.v1")
     checked(run["prepared_run"], "run_hash", "target-run.v1")
+    prepared = run["prepared_run"]
+    tasks = partition_tasks(prepared["manifest"], prepared["role"], prepared.get("validation_role"))
+    if (len(prepared["task_order"]) != len(tasks)
+            or set(prepared["task_order"]) != {task["task_id"] for task in tasks}):
+        raise ValueError("paired task schedule differs from frozen partition")
     checked(run["bank"], "bank_hash", "verified-source-bank.v3")
     if (run["source_run_hash"] != run["prepared_run"]["run_hash"] or run["bank_hash"] != run["bank"]["bank_hash"]
-            or run["study"] != run["prepared_run"]["study"] or run["prepared_run"]["role"] != "target_train"):
+            or run["study"] != run["prepared_run"]["study"]):
         raise ValueError("paired run identity mismatch")
+    if prepared["role"] == "validation" and any(run.get(k) != v for k, v in validation_binding(prepared).items()):
+        raise ValueError("paired validation metadata differs from preparation")
     memories = {m.memory_id: m for m in bank_memories(run["bank"])} if run["bank"]["memories"] else {}
     inputs = run["inputs"]
     if [item["task_id"] for item in inputs] != run["prepared_run"]["task_order"]:
@@ -304,6 +312,7 @@ def summarize_target_pairs(output_dir):
     counts = Counter(pair["status"] for pair in pairs)
     reasons = Counter(pair["reason"] for pair in pairs if pair["reason"] is not None)
     return seal({"schema_version": "target-pair-summary.v1", "run_hash": run["record_hash"],
+        **validation_binding(prepared),
         "planned_rollouts": len(inputs), "planned_pairs": len(allowed),
         "completed_pairs": counts["completed"], "pending_pairs": counts["pending"],
         "blocked_pairs": counts["blocked"], "excluded_rollouts": counts["excluded"],

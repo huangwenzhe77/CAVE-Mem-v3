@@ -47,6 +47,33 @@
 
 ## 后续阶段的扩展位置
 
-第二部分的采样、检索与冻结特征已在 `target_data/`，可恢复配对和在线随机单臂采集已在 `interventions/`。第三部分预计增加 `policy/`，第四部分预计增加 `evaluation/`；这两个目录当前没有占位实现。
+第二部分的采样、检索与冻结特征已在 `target_data/`，可恢复配对和在线随机单臂采集已在 `interventions/`。第三部分 `policy/` 已实现数据入口、冻结特征向量化、配对模型、独立校准、监督 gate、单臂 DR 与约束 bandit；第四部分已实现冻结包、完整任务验证、配对/保守选型与独立最终 test，整体离线验收见任务卡。
 
-公共模型与环境代码继续放在 `agents/` 和 `environments/`；第一部分的 `memory_generation/` 只负责来源记忆。目标提醒的观测结果已由第二部分采集代码保存；训练标签与最终测试结果仍待后续阶段产生，不能倒流为来源采集或原动作的输入。
+公共模型与环境代码继续放在 `agents/` 和 `environments/`；第一部分的 `memory_generation/` 只负责来源记忆。目标提醒的观测结果已由第二部分采集代码保存；训练标签仅来自审核过的第二部分记录，最终测试结果只属于后续冻结评估；二者不能倒流为来源采集或原动作的输入。
+
+## 第三部分模块
+
+| 职责 | 文件 | 输入 → 输出 |
+| --- | --- | --- |
+| 审核数据视图 | `policy/dataset.py` | prepared/paired/single → 独立训练/校准/选型数据集 |
+| 冻结特征 | `policy/features.py` | 已记录 x → 有明确版本/缺失语义的数值列 |
+| 配对监督 | `policy/supervised.py` | target_train → τ/h/各增量成本预测器 |
+| 校准 | `policy/calibration.py` | 独立 calibration → 组预测范围与风险分箱上界 |
+| 初始策略 | `policy/gate.py` | 校准支持和训练 x → 同容量监督 logistic gate |
+| 单臂估计 | `policy/dr.py` | 随机单臂 → 组交叉拟合与 DR/权重诊断 |
+| 约束优化 | `policy/bandit.py` | 初始 gate 与配对/DR → KL/风险/调用预算约束候选 |
+
+模型、校准和候选均是可核查 JSON。训练入口重读原始产物；预测入口只用冻结参数和 pre-treatment x。数值库通过可选 `policy` extra 安装，基础采集模块仍不依赖 NumPy。具体命令与统计范围见 [policy.md](policy.md)。
+
+## 第四部分模块
+
+| 职责 | 文件 | 输入 → 输出 |
+| --- | --- | --- |
+| 编包与决策 | `policy/frozen.py` | 已审核候选或规则 → 自包含冻结包与实际提醒概率 |
+| 完整验证任务 | `policy/rollout.py` | selection 任务与冻结包 → 全任务轨迹、结局、费用 |
+| 配对选型 | `policy/selection.py` | 前瞻候选计划、完整 rollout 与独立配对审核 → 选择锁 |
+| 不可恢复选型 | `policy/conservative_selection.py` | 完整 live rollout、最坏风险/调用界 → 保守选择锁 |
+| 最终计划与报告 | `policy/final_evaluation.py` | 选择锁、test 组分配 → 自包含最终计划与边际统计 |
+| 最终执行 | `policy/final_rollout.py` | 已授权的 test 任务 → 单次完整执行与原始事件 |
+
+训练/校准/选型加载时重核原始证据；最终冻结计划保存自包含快照，执行和报告不再读取历史训练结果。真实 test 访问由计划、任务和策略身份共同授权。全任务成功/效用和成本，与选中检查点的风险/调用预算是不同统计范围，不能混称。操作与限制见 [evaluation.md](evaluation.md)。

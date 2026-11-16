@@ -2,12 +2,13 @@
 
 ## Current scope
 
-The repository implements phase 1 and both phase 2 collection routes in software.
-The next research task is an exploratory real-benchmark source pilot: collect
-historical trajectories with a frozen actor, generate repair candidates with a
-teacher model, audit checkpoint restoration, and replay candidate repairs.
-Do not describe fixture tests as real results. Do not implement phases 3-4
-unless the user explicitly requests them.
+The repository implements the core four-phase software workflow, including both
+phase 2 collection routes, phase 3 learning and phase 4 frozen evaluation.
+The software-only goal passed I-01 acceptance on 2026-11-16 (353 offline tests
+and two independent reviews). The exploratory real-benchmark source pilot
+remains a separate future task; it is not automatically authorized by completion
+of the software goal. Do not describe fixture tests as real results or use them
+to select research parameters. See docs/software_handoff.md for scope and limits.
 
 ## Research constraints
 
@@ -39,19 +40,30 @@ unless the user explicitly requests them.
   report the incompatibility and propose a specific adapter or protocol change
   for review before running it.
 
-## Single-task execution workflow (2026-11-15)
+## Single-task execution workflow (2026-11-16)
 
-- For code implementation, use two coding agents and one independent review
-  agent, as explicitly requested by the user. Split file ownership to avoid
-  concurrent edits; the primary agent integrates and verifies the result.
+- For each code task, use exactly one implementation agent and two independent,
+  read-only review agents, as explicitly requested by the user. Assign the
+  implementation agent ownership of code edits; have one reviewer check research
+  validity and data boundaries and the other check engineering correctness.
+  The primary agent coordinates, integrates, and verifies without becoming a
+  second code writer.
 
-- The user's current workflow is defined in `docs/v1_plan.md` and
-  `docs/task_cards.md`. Read the selected task card before implementation.
-- Execute only one clearly identified task card per turn. State its ID,
+- The live workflow is defined in `docs/task_cards.md`; `docs/v1_plan.md` is
+  historical design context. Read the selected task card before implementation.
+- Execute only one clearly identified task card at a time. State its ID,
   verify its prerequisites, and stay within its Goal, Context, Rules, and
-  Acceptance. A request to continue selects only the next eligible card.
+  Acceptance. The user explicitly authorized continuous sequential execution on
+  2026-11-16: after a card passes both independent reviews and required tests,
+  record its results, derive the next card from the proposal, the four flowcharts
+  and current code, and proceed without waiting for another user message.
+- The thread goal tracks the whole remaining software workflow. Never overlap
+  implementation of cards or mark the overall goal complete after one card.
+  Only complete the goal when the whole required software workflow passes its
+  tests and reviews. A user pause/stop overrides continuous execution.
 - The roadmap is not authorization to implement every listed stage. Planning
   later stages does not override the current-scope restrictions above.
-- After the selected card is complete, report every changed file, checks,
-  actual outputs, and limitations; update that card's status and stop. Do not
-  automatically start the next card. Preserve blocked and failed results.
+- After each card, report changed files, checks, actual outputs and limitations;
+  update its status before beginning the next eligible card. Preserve blocked
+  and failed results. Formal data collection and real-model experiments remain
+  outside this software-only goal.

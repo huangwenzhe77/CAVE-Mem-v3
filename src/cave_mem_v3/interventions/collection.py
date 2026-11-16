@@ -1,5 +1,6 @@
 """Durable paired target collection. Every external attempt is write-ahead logged."""
 from __future__ import annotations
+from cave_mem_v3.target_data.partitions import validation_binding
 
 import copy
 import random
@@ -129,7 +130,8 @@ def collect_target_pairs(target_dir, bank, *, env_factory, actor_factory, output
     run = seal({"schema_version": "target-pair-run.v1", "source_run_hash": prepared["run_hash"],
         "bank_hash": bank["bank_hash"], "study": prepared["study"],
         "inputs": inputs, "prepared_run": prepared, "bank": bank,
-        "policy": "target_train_paired_only.v1"})
+        **validation_binding(prepared),
+        "policy": "target_train_paired_only.v1" if prepared["role"] == "target_train" else "validation_paired_only.v1"})
     root = Path(output_dir)
     run_path = root / "run.json"
     if run_path.exists():

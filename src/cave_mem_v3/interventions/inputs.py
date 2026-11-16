@@ -1,5 +1,6 @@
 """Read frozen preparation artifacts without sampling actions or observing outcomes."""
 from __future__ import annotations
+from cave_mem_v3.target_data.partitions import target_partition, partition_fields, partition_tasks, check_partition_resume
 
 import copy
 import math
@@ -242,9 +243,10 @@ def load_prepared_run(target_dir: str | Path, bank: dict) -> tuple[dict, list[di
     """Return a frozen input inventory, including every exclusion and error denominator."""
     root = Path(target_dir)
     run = checked(read_json(root / "run.json"), "run_hash", "target-run.v1")
-    if (run.get("role") != "target_train" or run.get("pre_treatment", {}).get("mode")
+    target_partition(run.get("role"), run.get("validation_role"))
+    if (run.get("pre_treatment", {}).get("mode")
             != "freeze_before_selected_action_execution.v1"):
-        raise ValueError("paired target input requires target_train prepare-target artifacts")
+        raise ValueError("paired target input requires frozen prepare-target artifacts")
     validate_manifest(run["manifest"], verify_assets=True)
     if run.get("manifest_hash") != run["manifest"]["manifest_hash"]:
         raise ValueError("prepared manifest hash mismatch")
@@ -258,7 +260,7 @@ def load_prepared_run(target_dir: str | Path, bank: dict) -> tuple[dict, list[di
         memories = {}
     else:
         raise ValueError("invalid empty bank")
-    tasks = {task["task_id"]: task for task in run["manifest"]["tasks"] if task["role"] == "target_train"}
+    tasks = {task["task_id"]: task for task in partition_tasks(run["manifest"], run["role"], run.get("validation_role"))}
     if (len(run["task_order"]) != len(set(run["task_order"])) or set(tasks) != set(run["task_order"])):
         raise ValueError("prepared task schedule differs from manifest")
     records, expected_names = [], set()
@@ -278,9 +280,9 @@ def load_prepared_run(target_dir: str | Path, bank: dict) -> tuple[dict, list[di
                 trace = checked(read_json(path), "trace_hash", "target-trace.v1")
                 base["trace_hash"] = trace["trace_hash"]
                 if (trace.get("run_hash") != run["run_hash"] or trace.get("task_id") != task_id
-                        or trace.get("role") != "target_train" or trace.get("trace_id") != trace_id
+                        or trace.get("role") != run["role"] or trace.get("trace_id") != trace_id
                         or trace.get("group_id") != tasks[task_id].get("group_id")
-                        or trace.get("validation_role") is not None
+                        or trace.get("validation_role") != run.get("validation_role")
                         or trace.get("manifest_hash") != run["manifest_hash"] or trace.get("run_index") != index
                         or trace.get("seed") != stage_seed(StudySpec(**run["study"]).base_seed, task_id, 0, "target_rollout")):
                     raise ValueError("prepared trace identity mismatch")

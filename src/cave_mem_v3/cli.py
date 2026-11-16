@@ -1,4 +1,4 @@
-"""Phase one commands: manifest -> collect -> candidates -> verify -> bank."""
+"""Auditable memory construction, target collection, policy learning and frozen evaluation."""
 from __future__ import annotations
 
 import argparse
@@ -24,6 +24,224 @@ def _new_directory(path):
         raise ValueError(f"output directory is not empty: {path}")
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _build_policy_dataset(args):
+    from cave_mem_v3.policy.dataset import write_policy_dataset
+    sources = [{"kind": "paired", "run": run, "prepared": prepared}
+               for run, prepared in args.paired]
+    sources.extend({"kind": "single", "run": run} for run in args.single)
+    dataset = write_policy_dataset(sources, args.output, role=args.role, validation_role=args.validation_role)
+    return {"output": str(Path(args.output).resolve()), "dataset_hash": dataset["record_hash"],
+            "fixture_only": dataset["fixture_only"], **dataset["summary"]}
+
+
+def _plan_final_evaluation(args):
+    from cave_mem_v3.policy.final_evaluation import FinalEvaluationConfig, create_final_evaluation_plan
+    lock = read_json(args.selection_lock)
+    if not lock.get('winner'):
+        raise ValueError('final plan requires a qualified selected lock')
+    bundle = lock['winner']['bundle']
+    raw = load_config(args.config)
+    if plain(StudySpec(**raw['study'])) != bundle['study']:
+        raise ValueError('final StudySpec differs from selected policy')
+    result = create_final_evaluation_plan(args.selection_lock, read_json(args.baselines),
+        config=FinalEvaluationConfig(**read_json(args.evaluation_config)), output=args.output,
+        run_dir=args.run_dir, report_path=args.report, env_factory=_env_factory(raw,bundle['manifest']),
+        actor_factory=lambda: _actor(raw))
+    return {'plan_hash': result['record_hash'], 'output': result['plan_path'], 'groups': result['group_assignments']}
+
+
+def _collect_final_evaluation(args):
+    from cave_mem_v3.policy.final_evaluation import load_final_evaluation_plan, collect_final_evaluation
+    from cave_mem_v3.target_data.retrieval import SentenceTransformerEncoder
+    plan = load_final_evaluation_plan(args.plan)
+    if Path(plan['run_dir']).exists():
+        return collect_final_evaluation(args.plan,env_factory=None,actor_factory=None,encoder=None)
+    raw = load_config(args.config)
+    if plain(StudySpec(**raw['study'])) != plan['conditions']['study']:
+        raise ValueError('final StudySpec changed')
+    path = Path(args.encoder_path).expanduser().resolve()
+    if not path.is_dir():
+        raise ValueError('encoder must be an existing local directory')
+    encoder = SentenceTransformerEncoder(str(path),revision=args.encoder_revision,device=args.device)
+    return collect_final_evaluation(args.plan,env_factory=_env_factory(raw,plan['conditions']['manifest']),
+        actor_factory=lambda: _actor(raw),encoder=encoder)
+
+
+def _report_final_evaluation(args):
+    from cave_mem_v3.policy.final_evaluation import export_final_evaluation_report
+    result = export_final_evaluation_report(args.plan)
+    return {'report_hash':result['record_hash'], 'evaluation_valid':result['evaluation_valid'],
+        'planned_tasks':result['planned_tasks'], 'observed_outcomes':result['observed_outcomes'],
+        'unknown_outcomes':result['unknown_outcomes'], 'statistics':result['statistics']}
+
+
+def _plan_conservative_selection(args):
+    from cave_mem_v3.policy.conservative_selection import SelectionConfig, create_conservative_selection_plan
+    result = create_conservative_selection_plan(read_json(args.candidates), lock_path=args.lock,
+        config=SelectionConfig(**read_json(args.config)), output=args.output)
+    return {"plan_hash": result["record_hash"], "candidates": result["candidate_order"], "output": result["plan_path"]}
+
+
+def _collect_conservative_selection(args):
+    from cave_mem_v3.policy.conservative_selection import load_conservative_selection_plan, collect_conservative_selection_plan
+    from cave_mem_v3.target_data.retrieval import SentenceTransformerEncoder
+    plan = load_conservative_selection_plan(args.plan)
+    raw = load_config(args.config)
+    if plain(StudySpec(**raw["study"])) != plan["conditions"]["study"]:
+        raise ValueError("selection study configuration differs from prospective plan")
+    if any(Path(path).exists() for path in (plan["lock_path"], *(e["rollout_dir"] for e in plan["candidates"]))):
+        raise ValueError("selection output exists; no retries or encoder/provider construction")
+    encoder = SentenceTransformerEncoder(args.encoder_path, revision=args.encoder_revision, device=args.device)
+    return collect_conservative_selection_plan(args.plan, env_factory=_env_factory(raw, plan["conditions"]["manifest"]),
+        actor_factory=lambda: _actor(raw), encoder=encoder)
+
+
+def _select_conservative_policy(args):
+    from cave_mem_v3.policy.conservative_selection import select_conservative_policy
+    result = select_conservative_policy(args.plan)
+    return {"status": result["status"], "lock_hash": result["record_hash"],
+        "winner": result["winner"]["candidate_id"] if result["winner"] else None, "candidates": result["candidates"]}
+
+
+def _plan_policy_selection(args):
+    from cave_mem_v3.policy.selection import SelectionConfig, create_selection_plan
+    result = create_selection_plan(read_json(args.candidates), audit_dir=args.audit_dir, lock_path=args.lock,
+        config=SelectionConfig(**read_json(args.config)), output=args.output)
+    return {"plan_hash": result["record_hash"], "candidates": result["candidate_order"], "output": result["plan_path"]}
+
+
+def _collect_policy_selection(args):
+    from cave_mem_v3.policy.selection import load_selection_plan, collect_selection_plan
+    from cave_mem_v3.target_data.retrieval import SentenceTransformerEncoder
+    plan = load_selection_plan(args.plan)
+    raw = load_config(args.config)
+    if plain(StudySpec(**raw["study"])) != plan["conditions"]["study"]:
+        raise ValueError("selection study configuration differs from prospective plan")
+    if any(Path(path).exists() for path in (plan["audit_dir"], plan["lock_path"], *(e["rollout_dir"] for e in plan["candidates"]))):
+        raise ValueError("selection output exists; no retries or encoder/provider construction")
+    encoder = SentenceTransformerEncoder(args.encoder_path, revision=args.encoder_revision, device=args.device)
+    return collect_selection_plan(args.plan, env_factory=_env_factory(raw, plan["conditions"]["manifest"]),
+        actor_factory=lambda: _actor(raw), encoder=encoder)
+
+
+def _select_policy(args):
+    from cave_mem_v3.policy.selection import select_policy
+    result = select_policy(args.plan)
+    return {"status": result["status"], "lock_hash": result["record_hash"],
+        "winner": result["winner"]["candidate_id"] if result["winner"] else None, "candidates": result["candidates"]}
+
+
+def _freeze_policy(args):
+    from cave_mem_v3.benchmarks.tasks import load_manifest
+    from cave_mem_v3.policy.frozen import freeze_policy
+    from cave_mem_v3.target_data.sampling import RiskHazard
+    raw = load_config(args.config)
+    actor = _actor(raw)
+    try:
+        actor_config = actor.configuration()
+    finally:
+        close = getattr(actor, "close", None)
+        if close:
+            close()
+    bundle = freeze_policy(load_manifest(args.manifest), read_json(args.bank), actor_config=actor_config,
+        encoder_identity=read_json(args.encoder_identity), study=StudySpec(**raw["study"]),
+        hazard=RiskHazard(**read_json(args.hazard)), policy_config=read_json(args.policy_config),
+        exposure_rules=read_json(args.exposure_rules) if args.exposure_rules else None,
+        model_path=args.model, calibration_path=args.calibration, warm_gate_path=args.warm_gate,
+        bandit_path=args.bandit, output=args.output)
+    return {"bundle_hash": bundle["record_hash"], "output": str(Path(args.output).resolve()), "validation_required": True}
+
+
+def _collect_policy_validation(args):
+    from cave_mem_v3.policy.rollout import collect_policy_validation, existing_validation_summary, _role
+    from cave_mem_v3.policy.frozen import load_frozen_policy
+    from cave_mem_v3.target_data.retrieval import SentenceTransformerEncoder
+    _role(args.role, args.validation_role)
+    bundle = load_frozen_policy(args.bundle)
+    raw = load_config(args.config)
+    if plain(StudySpec(**raw["study"])) != bundle["study"]:
+        raise ValueError("validation StudySpec differs from frozen bundle")
+    config_identity = digest({"execution_config": raw, "encoder_path": str(Path(args.encoder_path).expanduser().resolve()),
+        "encoder_revision": args.encoder_revision, "device": args.device})
+    existing = existing_validation_summary(args.output, bundle, config_identity)
+    if existing is not None:
+        return existing
+    encoder = None
+    if bundle['policy_config']['kind'] != 'no_memory':
+        encoder_path = Path(args.encoder_path)
+        if not encoder_path.is_dir():
+            raise ValueError("encoder must be an existing local directory")
+        encoder = SentenceTransformerEncoder(str(encoder_path.resolve()), revision=args.encoder_revision, device=args.device)
+    return collect_policy_validation(args.bundle, env_factory=_env_factory(raw, bundle["manifest"]),
+        actor_factory=lambda: _actor(raw), encoder=encoder, output_dir=args.output,
+        role=args.role, validation_role=args.validation_role, config_identity=config_identity)
+
+
+def _summarize_policy_validation(args):
+    from cave_mem_v3.policy.rollout import summarize_policy_validation
+    return summarize_policy_validation(args.run)
+
+
+def _train_bandit(args):
+    from cave_mem_v3.policy.bandit import BanditConfig, train_bandit
+    result = train_bandit(args.dataset, args.model, args.calibration, args.warm_gate,
+        config=BanditConfig(**read_json(args.config)), dr_path=args.dr, output=args.output)
+    return {"output": str(Path(args.output).resolve()), "artifact_hash": result["record_hash"],
+        "fixture_only": result["fixture_only"], "status": result["status"], "reason": result["reason"],
+        "denominators": result["denominators"]}
+
+
+def _estimate_single_dr(args):
+    from cave_mem_v3.policy.dr import DRConfig, estimate_single_dr
+    result = estimate_single_dr(args.dataset, config=DRConfig(**read_json(args.config)), output=args.output)
+    return {"output": str(Path(args.output).resolve()), "artifact_hash": result["record_hash"],
+            "fixture_only": result["fixture_only"], **result["summary"]}
+
+
+def _train_policy(args):
+    from cave_mem_v3.policy.supervised import SupervisedConfig, fit_supervised
+    config = SupervisedConfig(**read_json(args.config))
+    model = fit_supervised(args.dataset, config=config, output=args.output)
+    return {"output": str(Path(args.output).resolve()), "model_hash": model["record_hash"],
+            "fixture_only": model["fixture_only"], "heads": {k: v["status"] for k, v in model["heads"].items()}}
+
+
+def _calibrate_policy(args):
+    from cave_mem_v3.policy.calibration import CalibrationConfig, calibrate_supervised
+    calibration = calibrate_supervised(args.model, args.dataset,
+        config=CalibrationConfig(**read_json(args.config)), output=args.output)
+    return {"output": str(Path(args.output).resolve()), "calibration_hash": calibration["record_hash"],
+            "fixture_only": calibration["fixture_only"], "heads": {k: v["status"] for k, v in calibration["heads"].items()}}
+
+
+def _train_initial_gate(args):
+    from cave_mem_v3.policy.gate import GateConfig, fit_initial_gate
+    gate = fit_initial_gate(args.model, args.calibration, args.dataset,
+        config=GateConfig(**read_json(args.config)), output=args.output)
+    return {"output": str(Path(args.output).resolve()), "gate_hash": gate["record_hash"],
+            "fixture_only": gate["fixture_only"], "status": gate["head"]["status"]}
+
+
+def _predict_policy(args):
+    from cave_mem_v3.policy.supervised import load_supervised, predict_supervised, _save
+    from cave_mem_v3.policy.calibration import predict_calibrated
+    from cave_mem_v3.policy.gate import predict_initial_gate
+    model = load_supervised(args.model)
+    x = read_json(args.features)
+    sources = list(model.get("raw_sources", []))
+    if args.gate and not args.calibration:
+        raise ValueError("initial gate prediction requires its calibration")
+    if args.calibration:
+        calibration = read_json(args.calibration)
+        sources.extend(calibration.get("raw_sources", []))
+        result = predict_initial_gate(read_json(args.gate), model, calibration, x) if args.gate else predict_calibrated(model, x, calibration)
+    else:
+        result = predict_supervised(model, x)
+    if args.output:
+        _save(args.output, result, sources)
+    return result
 
 
 def _provider(raw, section):
@@ -162,13 +380,16 @@ def _collect_target(args):
     from cave_mem_v3.benchmarks.tasks import load_manifest
     from cave_mem_v3.target_data.collection import collect_target
     from cave_mem_v3.target_data.sampling import RiskHazard
+    from cave_mem_v3.target_data.partitions import check_partition_resume, partition_tasks
+    check_partition_resume(args.output, args.role, args.validation_role)
     raw = load_config(args.config)
     manifest = load_manifest(args.manifest)
+    partition_tasks(manifest, args.role, args.validation_role)
     spec = StudySpec(**raw["study"])
     _actor(raw)
     hazard = RiskHazard(low_risk_probability=args.low_risk_probability,
                         high_risk_probability=args.high_risk_probability)
-    return collect_target(manifest, role=args.role, spec=spec,
+    return collect_target(manifest, role=args.role, validation_role=args.validation_role, spec=spec,
                           env_factory=_env_factory(raw, manifest),
                           actor_factory=lambda: _actor(raw),
                           output_dir=args.output, hazard=hazard)
@@ -181,13 +402,19 @@ def _prepare_target(args):
     from cave_mem_v3.target_data.retrieval import SentenceTransformerEncoder
     from cave_mem_v3.target_data.sampling import RiskHazard
     from cave_mem_v3.target_data.pre_treatment_state import validate_exposure_rules
+    from cave_mem_v3.target_data.partitions import check_partition_resume, partition_tasks
+    check_partition_resume(args.output, args.role, args.validation_role)
     raw = load_config(args.config)
     manifest = load_manifest(args.manifest)
+    partition_tasks(manifest, args.role, args.validation_role)
     spec = StudySpec(**raw["study"])
     encoder_path = Path(args.encoder_path)
     if not encoder_path.is_dir():
         raise ValueError("--encoder-path must point to an existing local embedding model directory; downloads are disabled")
     bank = load_bank(args.bank)
+    if args.role == "validation":
+        from cave_mem_v3.target_data.partitions import validate_validation_bank
+        validate_validation_bank(manifest, bank)
     try:
         encoder = SentenceTransformerEncoder(str(encoder_path.resolve()),
                                              revision=args.encoder_revision,
@@ -200,7 +427,7 @@ def _prepare_target(args):
     hazard = RiskHazard(low_risk_probability=args.low_risk_probability,
                         high_risk_probability=args.high_risk_probability)
     return collect_target(
-        manifest, role=args.role, spec=spec,
+        manifest, role=args.role, validation_role=args.validation_role, spec=spec,
         env_factory=_env_factory(raw, manifest), actor_factory=lambda: _actor(raw),
         output_dir=args.output, hazard=hazard, prepare_before_action=True,
         bank=bank, encoder=encoder, exposure_rules=exposure_rules)
@@ -243,12 +470,13 @@ def _collect_single_target(args):
     from cave_mem_v3.target_data.pre_treatment_state import validate_exposure_rules
     from cave_mem_v3.target_data.retrieval import SentenceTransformerEncoder
     from cave_mem_v3.target_data.sampling import RiskHazard
-    if args.role != "target_train":
-        raise ValueError("single-arm collection requires target_train; validation/test are not supported")
+    from cave_mem_v3.target_data.partitions import check_partition_resume, partition_tasks
+    check_partition_resume(args.output, args.role, args.validation_role)
     if not math.isfinite(args.assignment_probability) or not 0 < args.assignment_probability < 1:
         raise ValueError("assignment probability for Remind must be strictly between zero and one")
     raw = load_config(args.config)
     manifest = load_manifest(args.manifest, verify_assets=True)
+    partition_tasks(manifest, args.role, args.validation_role)
     spec = StudySpec(**raw["study"])
     hazard = RiskHazard(low_risk_probability=args.low_risk_probability,
                         high_risk_probability=args.high_risk_probability)
@@ -263,7 +491,7 @@ def _collect_single_target(args):
                                              revision=args.encoder_revision, device=args.device)
     except RuntimeError as exc:
         raise ValueError(str(exc)) from exc
-    return collect_single_target(manifest, bank=bank, role=args.role, spec=spec,
+    return collect_single_target(manifest, bank=bank, role=args.role, validation_role=args.validation_role, spec=spec,
         env_factory=_env_factory(raw, manifest), actor_factory=lambda: _actor(raw),
         output_dir=args.output, encoder=encoder, hazard=hazard, exposure_rules=exposure_rules,
         assignment_probability=args.assignment_probability)
@@ -459,6 +687,75 @@ def _audit(args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
+    p = sub.add_parser('plan-final-evaluation', help='freeze selection lock, fixed baselines and randomized held-out test groups')
+    for key in ('selection-lock','baselines','evaluation-config','config','output','run-dir','report'):
+        p.add_argument('--'+key,required=True)
+    p = sub.add_parser('collect-final-evaluation', help='execute only test tasks assigned by a frozen final plan')
+    for key in ('plan','config','encoder-path','encoder-revision'):
+        p.add_argument('--'+key,required=True)
+    p.add_argument('--device',default='cpu',choices=('cpu','cuda'))
+    p = sub.add_parser('report-final-evaluation', help='audit final test journals and export immutable marginal group report')
+    p.add_argument('--plan',required=True)
+    p = sub.add_parser("plan-conservative-selection", help="register frozen candidates and new validation slots before outcomes")
+    for key in ("candidates", "lock", "config", "output"):
+        p.add_argument("--" + key, required=True)
+    p = sub.add_parser("collect-conservative-selection", help="execute a prospective validation plan without retries")
+    for key in ("plan", "config", "encoder-path", "encoder-revision"):
+        p.add_argument("--" + key, required=True)
+    p.add_argument("--device", default="cpu", choices=("cpu", "cuda"))
+    p = sub.add_parser("select-conservative-policy", help="audit planned full-task and worst-case non-restorable validation; freeze selection lock")
+    p.add_argument("--plan", required=True)
+    p = sub.add_parser("plan-policy-selection", help="register frozen candidates and new validation slots before outcomes")
+    for key in ("candidates", "audit-dir", "lock", "config", "output"):
+        p.add_argument("--" + key, required=True)
+    p = sub.add_parser("collect-policy-selection", help="execute a prospective validation plan without retries")
+    for key in ("plan", "config", "encoder-path", "encoder-revision"):
+        p.add_argument("--" + key, required=True)
+    p.add_argument("--device", default="cpu", choices=("cpu", "cuda"))
+    p = sub.add_parser("select-policy", help="audit planned full-task and independent paired validation; freeze selection lock")
+    p.add_argument("--plan", required=True)
+    p = sub.add_parser("freeze-policy", help="freeze component or learned policy before validation outcomes")
+    for key in ("config", "manifest", "bank", "encoder-identity", "hazard", "policy-config", "output"):
+        p.add_argument("--" + key, required=True)
+    for key in ("exposure-rules", "model", "calibration", "warm-gate", "bandit"):
+        p.add_argument("--" + key)
+    p = sub.add_parser("collect-policy-validation", help="complete independent selection-validation tasks under a frozen policy")
+    for key in ("bundle", "config", "encoder-path", "encoder-revision", "output"):
+        p.add_argument("--" + key, required=True)
+    p.add_argument("--role", default="validation")
+    p.add_argument("--validation-role", default="selection")
+    p.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    p = sub.add_parser("summarize-policy-validation", help="reconstruct full-task validation outcomes from original events")
+    p.add_argument("--run", required=True)
+    p = sub.add_parser("train-bandit", help="train separate paired or DR same-capacity constrained candidate and no-risk comparator")
+    for key in ("dataset", "model", "calibration", "warm-gate", "config", "output"):
+        p.add_argument("--" + key, required=True)
+    p.add_argument("--dr", help="audited crossfit artifact required only for single route")
+    p = sub.add_parser("estimate-single-dr", help="grouped crossfit and DR training diagnostics from audited randomized single logs")
+    for key in ("dataset", "config", "output"):
+        p.add_argument("--" + key, required=True)
+    p = sub.add_parser("train-policy", help="fit paired benefit, harm and incremental cost heads from audited training data")
+    for key in ("dataset", "config", "output"):
+        p.add_argument("--" + key, required=True)
+    p = sub.add_parser("calibrate-policy", help="calibrate fixed heads on independent validation/calibration groups")
+    for key in ("model", "dataset", "config", "output"):
+        p.add_argument("--" + key, required=True)
+    p = sub.add_parser("train-initial-gate", help="supervise a same-capacity gate using conservative calibrated labels on training x")
+    for key in ("model", "calibration", "dataset", "config", "output"):
+        p.add_argument("--" + key, required=True)
+    p = sub.add_parser("predict-policy", help="offline prediction from a frozen x; no actor or environment execution")
+    for key in ("model", "features"):
+        p.add_argument("--" + key, required=True)
+    p.add_argument("--calibration")
+    p.add_argument("--gate")
+    p.add_argument("--output")
+    p = sub.add_parser("build-policy-dataset", help="audit one explicit target partition and export a read-only policy dataset view")
+    p.add_argument("--role", choices=("target_train", "validation"), default="target_train")
+    p.add_argument("--validation-role", choices=("calibration", "selection"))
+    p.add_argument("--paired", nargs=2, action="append", default=[], metavar=("RUN", "PREPARED"),
+                   help="paired run directory and its original prepared directory; repeat for additional runs")
+    p.add_argument("--single", action="append", default=[], help="single-arm run directory; may be repeated")
+    p.add_argument("--output", required=True)
     p = sub.add_parser("check", help="check pending configuration, without model/network access")
     p.add_argument("--config", required=True)
     p = sub.add_parser("manifest", help="freeze benchmark roles and task assets")
@@ -473,6 +770,7 @@ def main(argv=None):
     p.add_argument("--manifest", required=True)
     p.add_argument("--output", required=True)
     p.add_argument("--role", choices=("target_train", "validation"), required=True)
+    p.add_argument("--validation-role", choices=("calibration", "selection"))
     p.add_argument("--low-risk-probability", type=float, default=0.05)
     p.add_argument("--high-risk-probability", type=float, default=0.75)
     p = sub.add_parser("prepare-target", help="freeze pre-treatment state at the selected checkpoint before executing a0")
@@ -480,6 +778,7 @@ def main(argv=None):
     p.add_argument("--manifest", required=True)
     p.add_argument("--output", required=True)
     p.add_argument("--role", choices=("target_train", "validation"), required=True)
+    p.add_argument("--validation-role", choices=("calibration", "selection"))
     p.add_argument("--bank", required=True)
     p.add_argument("--encoder-path", required=True,
                    help="existing local sentence-transformers model directory; no download is attempted")
@@ -497,7 +796,8 @@ def main(argv=None):
     p = sub.add_parser("collect-single-target", help="freeze inputs and run one randomized arm in the same live target session")
     for key in ("config", "manifest", "bank", "output", "encoder-path", "encoder-revision"):
         p.add_argument("--" + key, required=True)
-    p.add_argument("--role", default="target_train", help="only target_train is supported")
+    p.add_argument("--role", default="target_train", help="target_train or validation; validation also requires --validation-role")
+    p.add_argument("--validation-role", choices=("calibration", "selection"))
     p.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     p.add_argument("--exposure-rules", help="optional frozen action-exposure rules; absent rules preserve e=?")
     p.add_argument("--assignment-probability", type=float, required=True,
@@ -539,6 +839,12 @@ def main(argv=None):
         if args.command == "pair-target" and result.get("pending_pairs"):
             return 2
         if args.command == "collect-single-target" and result.get("pending_rollouts"):
+            return 2
+        if args.command == "collect-policy-validation" and result.get("pending_tasks"):
+            return 2
+        if args.command in ("collect-policy-selection", "collect-conservative-selection") and result.get("status") == "incomplete":
+            return 2
+        if args.command == "collect-final-evaluation" and result.get("evaluation_valid") is not True:
             return 2
         return 0
     except (ValueError, KeyError, TypeError, OSError) as exc:

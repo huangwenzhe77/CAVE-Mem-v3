@@ -1,5 +1,6 @@
 """Read-only validation of observed single-arm outcomes; no counterfactual labels."""
 from __future__ import annotations
+from cave_mem_v3.target_data.partitions import target_partition, partition_tasks, validation_binding
 
 from collections import Counter
 import math
@@ -17,7 +18,7 @@ from cave_mem_v3.memory_generation.predicates import evaluate_conditions
 from cave_mem_v3.memory_generation.replay import require_current_evidence
 from cave_mem_v3.target_data.pre_treatment_state import _context, _exposure, _public_action, validate_exposure_rules
 from cave_mem_v3.target_data.retrieval import _query_text
-from cave_mem_v3.target_data.sampling import OnlineCheckpointSampler, RiskHazard
+from cave_mem_v3.target_data.sampling import OnlineCheckpointSampler, OrdinaryActorSampler, RiskHazard
 
 
 def _cost_record(value):
@@ -99,8 +100,11 @@ def _preparation(events, record, run, task, trace_id, seed, memories, *, partial
             or record["trace_id"] != trace_id or record["seed"] != seed
             or record["status"] not in ("prepared", "no_selection", "preparation_error", "error")):
         raise ValueError("single-session preparation identity/status mismatch")
-    sampler = OnlineCheckpointSampler(role="target_train", task_id=task["task_id"], trace_id=trace_id,
-        seed=seed, hazard=RiskHazard(**run["risk_hazard"]))
+    no_memory = run.get("bundle", {}).get("policy_config", {}).get("kind") == "no_memory"
+    sampler_type = OrdinaryActorSampler if no_memory else OnlineCheckpointSampler
+    sampler = sampler_type(role=run["role"], task_id=task["task_id"], trace_id=trace_id,
+        seed=seed, hazard=RiskHazard(**run["risk_hazard"]),
+        final_authorization=run.get("final_authorization"))
     costs, prior, calls, tools, seen_steps = empty_costs(), [], {}, {}, []
     current_context = None
     identities, terminal_outcomes = [], []
@@ -229,19 +233,23 @@ def _preparation(events, record, run, task, trace_id, seed, memories, *, partial
     return costs
 
 
-def _live_arm(events, record, item, assignment, spec, *, partial=False):
+def _live_arm(events, record, item, assignment, spec, *, partial=False, policy_execution=False):
     """Recompute one observed continuation from its original execution events."""
+    schema = "target-policy-live-arm.v1" if policy_execution else "target-live-arm.v1"
     if partial:
-        if record.get("schema_version") != "target-live-arm.v1":
+        if record.get("schema_version") != schema:
             raise ValueError("unsupported pending live-arm schema")
     else:
-        checked(record, schema="target-live-arm.v1")
+        checked(record, schema=schema)
     arm, seed = assignment["arm"], assignment["execution_seed"]
+    if policy_execution and (item["remaining_model_calls"] < 0 or item["remaining_steps"] < 1
+            or arm == "remind" and item["remaining_model_calls"] < 1):
+        raise ValueError("policy continuation violates frozen budget")
     reminder_hash = assignment["reminder"]["text_hash"] if arm == "remind" else None
     budget = {"remaining_model_calls": item["remaining_model_calls"],
               "remaining_steps": item["remaining_steps"],
-              "continuation_model_calls": item["remaining_model_calls"] - 1,
-              "intervention_reserved_calls": 1}
+              "continuation_model_calls": max(0, item["remaining_model_calls"] - 1) if policy_execution else item["remaining_model_calls"] - 1,
+              "intervention_reserved_calls": min(1, item["remaining_model_calls"]) if policy_execution else 1}
     if (record["arm"] != arm or record["seed"] != seed or record["a0_hash"] != item["a0_hash"]
             or record.get("initial_checkpoint_hash") is not None or record.get("restore_fingerprint") is not None
             or record.get("execution_mode") != "same_live_session_no_restore.v1"
@@ -572,10 +580,11 @@ def summarize_target_single(output_dir):
     from cave_mem_v3.interventions.single import PROTOCOL
     root = Path(output_dir)
     run = checked(read_json(root / "run.json"), schema="target-single-run.v1")
+    target_partition(run.get("role"), run.get("validation_role"))
     validate_manifest(run["manifest"])
     spec = StudySpec(**run["study"])
     probability = run["assignment_probability"]
-    if (run["role"] != "target_train" or run["protocol"] != PROTOCOL
+    if (run["protocol"] != PROTOCOL
             or run["manifest_hash"] != run["manifest"]["manifest_hash"]
             or isinstance(probability, bool) or not 0 < finite(probability, "assignment_probability") < 1
             or run["actor_capabilities"].get("stateless") is not True):
@@ -593,7 +602,7 @@ def summarize_target_single(output_dir):
     if run["exposure_rules_hash"] != (digest(run["exposure_rules"]) if run["exposure_rules"] is not None else None):
         raise ValueError("single-session frozen exposure rules changed")
     RiskHazard(**run["risk_hazard"])
-    tasks = sorted((task for task in run["manifest"]["tasks"] if task["role"] == "target_train"), key=lambda task: task["task_id"])
+    tasks = sorted(partition_tasks(run["manifest"], run["role"], run.get("validation_role")), key=lambda task: task["task_id"])
     random.Random(spec.base_seed).shuffle(tasks)
     if (not tasks or run["task_order"] != [task["task_id"] for task in tasks]
             or set(run["environment_configs"]) != set(run["task_order"])
@@ -616,6 +625,7 @@ def summarize_target_single(output_dir):
         raise ValueError("single-session directory contains unregistered tasks")
     counts = Counter(row["status"] for row in observations)
     return seal({"schema_version": "target-single-summary.v1", "run_hash": run["record_hash"],
+        **validation_binding(run),
         "planned_rollouts": len(tasks), "completed_rollouts": counts["completed"],
         "pending_rollouts": counts["pending"], "pending_sessions": counts["pending"],
         "unattempted_rollouts": counts["unattempted"], "excluded_rollouts": counts["excluded"],

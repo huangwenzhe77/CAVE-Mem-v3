@@ -52,9 +52,15 @@ def run_live_target_arm(env, actor, *, context: PublicContext, first_action: dic
         journal=journal, expected_response_identity=expected_response_identity, live=True)
 
 
+def run_frozen_policy_arm(env, actor, **kwargs):
+    """Versioned complete-policy continuation, including cached Silent at R=0."""
+    return _run_target_arm(env, actor, checkpoint=None, live=True, policy_execution=True,
+        journal=kwargs.pop("journal", None), expected_response_identity=kwargs.pop("expected_response_identity", None), **kwargs)
+
+
 def _run_target_arm(env, actor, *, context, checkpoint, first_action, arm, reminder,
                     spec, seed, remaining_model_calls, remaining_steps, journal,
-                    expected_response_identity, live):
+                    expected_response_identity, live, policy_execution=False):
     """The caller owns fresh env/actor instances and closes them after this call.
 
     The cached draft is already charged by preparation. Reserve one remaining
@@ -70,8 +76,9 @@ def _run_target_arm(env, actor, *, context, checkpoint, first_action, arm, remin
     if not isinstance(first_action, dict) or not first_action:
         raise ValueError("cached action must be a nonempty mapping")
     for name, value in (("remaining_model_calls", remaining_model_calls), ("remaining_steps", remaining_steps)):
-        if type(value) is not int or value < 1:
-            raise ValueError(name + " must be a positive integer")
+        minimum = 0 if policy_execution and live and arm == "silent" and name == "remaining_model_calls" else 1
+        if type(value) is not int or value < minimum:
+            raise ValueError(name + " violates the frozen execution budget")
     if remaining_model_calls > spec.max_model_calls or remaining_steps > min(spec.max_steps, context.remaining_steps):
         raise ValueError("remaining budgets exceed frozen study/environment limits")
     if arm == "silent" and reminder is not None:
@@ -92,15 +99,15 @@ def _run_target_arm(env, actor, *, context, checkpoint, first_action, arm, remin
     costs = empty_costs()
     intervention_costs, continuation_costs = empty_costs(), empty_costs()
     record = {
-        "schema_version": "target-live-arm.v1" if live else "target-arm.v1", "arm": arm, "seed": seed,
+        "schema_version": "target-policy-live-arm.v1" if policy_execution else "target-live-arm.v1" if live else "target-arm.v1", "arm": arm, "seed": seed,
         "status": "error", "success": None, "utility": None,
         "outcome_valid": False, "utility_valid": False,
         "termination_reason": None, "actor_behavior": "not_observed", "error": None,
         "a0_hash": digest(first_action), "initial_checkpoint_hash": None if live else digest(checkpoint),
         "restore_fingerprint": None, "steps": [], "costs": costs,
         "budget": {"remaining_model_calls": remaining_model_calls, "remaining_steps": remaining_steps,
-                   "continuation_model_calls": remaining_model_calls - 1,
-                   "intervention_reserved_calls": 1},
+                   "continuation_model_calls": max(0, remaining_model_calls - 1),
+                   "intervention_reserved_calls": min(1, remaining_model_calls)},
         "actor_config": copy.deepcopy(actor.configuration()),
         "environment_config": copy.deepcopy(env.configuration()),
         "response_identity": {"model": None, "fingerprint": None, "fingerprint_status": "not_observed"},
@@ -255,7 +262,7 @@ def _run_target_arm(env, actor, *, context, checkpoint, first_action, arm, remin
         for step_index in range(remaining_steps):
             check_configuration()
             if step_index:
-                if continuation_calls >= remaining_model_calls - 1:
+                if continuation_calls >= max(0, remaining_model_calls - 1):
                     record["termination_reason"] = "budget_exhausted"
                     break
                 response = actor_call(current, index=continuation_calls)

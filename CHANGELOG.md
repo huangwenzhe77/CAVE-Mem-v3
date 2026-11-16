@@ -1,5 +1,198 @@
 # 变更记录
 
+## 2026-11-16 — I-01 四部分核心软件整体验收
+
+一名实现 agent 独占源码/测试修改，两名独立只读 agent 分别审核研究边界和工程正确性；主 agent 运行最终集成检查并维护文档。P3/P4/I-01 共 10 张代码卡按前置依赖逐卡完成，没有并行实施下一张卡。
+
+| 文件 | 本卡变更 |
+| --- | --- |
+| `examples/four_phase_learning_demo.py` | 新增不导入 tests 的实际拟合完整示例；原始来源/配对/单臂→模型/校准/gate/两条bandit→新完整验证选择→最终test；原始证据hash守恒 |
+| `tests/test_learning_integration.py` | 7项实际拟合/冻结执行/no_memory无检索与完整预算/pending/旧报告/未知覆盖测试；模块化helper避免重复收集测试 |
+| `src/cave_mem_v3/policy/frozen.py` | no_memory独立协议身份；已有组件和学习包保持原协议 |
+| `src/cave_mem_v3/target_data/sampling.py` | OrdinaryActorSampler显式关闭检查点抽样，保留角色和最终test授权 |
+| `src/cave_mem_v3/interventions/single.py` | 仅冻结no_memory路径使用普通actor全预算，无encoder/检索/特征/gate/提醒；原公开单臂采集不变 |
+| `src/cave_mem_v3/interventions/single_outcomes.py` | 普通actor禁用采样记录的只读重核，保持旧原始日志路径 |
+| `src/cave_mem_v3/policy/rollout.py` | 无记忆完整验证无需encoder，保留所有任务、真实成本、终局与pending |
+| `src/cave_mem_v3/policy/final_rollout.py` | 无记忆最终分配任务采用同一完整预算路径，真实test角色与授权不变 |
+| `src/cave_mem_v3/policy/selection.py` | 配对选型识别no_memory结构性零干预风险/局部gate开销，完整任务费用不归零 |
+| `src/cave_mem_v3/policy/conservative_selection.py` | 保守选型同样支持no_memory，无特征任务仍保留全任务和支持分母 |
+| `src/cave_mem_v3/policy/final_evaluation.py` | 新计划登记v/ρ/e描述性覆盖，新report.v2保留未知决策/结局/费用；旧计划继续v1 |
+| `src/cave_mem_v3/cli.py` | 独立no_memory验证跳过encoder构造；help总说明覆盖四部分 |
+| `pyproject.toml` | 包描述更新为四部分软件范围 |
+| `AGENTS.md` | 记录软件目标已验收、真实pilot另行授权，持续保留一写两审和逐卡规则 |
+| `README.md` | 四部分状态、安装/完整演示入口、当前分支未发布及实际配置检查范围 |
+| `docs/architecture.md` | 补齐第三四部分模块、两种选择协议和最终计划/执行/报告映射 |
+| `docs/phase1.md` | 同步其他阶段的软件实现状态，不改来源研究规则 |
+| `docs/experiment_design.md` | 更新角色/单臂统计实现状态，保持研究假说与真实实验边界 |
+| `docs/policy.md` | 更新已实现后续模块，明确纯单臂从零尚不支持及预算/校准范围 |
+| `docs/evaluation.md` | no_memory与Silent区别、结构性零的局部范围、v2描述覆盖与v1兼容 |
+| `docs/software_goal.md` | 四部分与proposal对应、最终验收和剩余研究范围 |
+| `docs/software_handoff.md` | 新交接：版本未发布、安装、完整演示、配置/数据迁移条件、限制、下一张R-01卡 |
+| `docs/server_handoff.md` | 旧s2已发布版本保留历史内容，顶部链接新交接并明确旧状态不适用于新实现 |
+| `docs/task_cards.md` | I-01及总体软件目标完成；真实R-01未启动 |
+| `CHANGELOG.md` | 本表与实际验收、设置、产物和未完成事项 |
+
+验收：实现新增 **7项**、工程独立 **66项**及完整演示、研究独立 **7项**及额外配对no_memory探针全部通过。根 agent `.venv/Scripts/python.exe scripts/run_tests.py` **353项通过（245.475秒）**；源码/测试/示例/配置的88份hash在最终测试启动后未改变。标准 `pip install -e '.[policy]'`、CLI帮助、文档链接与diff检查通过。使用Python3.14.8、NumPy2.5.4；最初无构建隔离的安装因虚拟环境缺setuptools失败，标准构建隔离安装成功，不涉及代码修复。当前server.toml只读检查是ready:true/model_downloaded:false，仅说明必填字段齐备，不是模型/资产/协议就绪证明。
+
+根 agent 独立运行 `examples/four_phase_learning_demo.py --output runs/i-01-fixture-final-20261116`：1个history来源、24个train、12个calibration、8个selection、12个test任务；固定脚本actor/encoder、steps/calls4、seed42、hazard .999999、来源K2；校准alpha .2/min_groups2/bins2，gate风险阈值.9，paired/single bandit风险1/调用5/40轮/30bootstrap，单臂分配.5、DR两折，最终组分配.5/.5、seed42/bootstrap43。以上为明确的任意软件输入，不是研究参数建议。
+
+实际结果：7个预测头与初始gate均fitted，paired/single bandit均candidate，DR24行/24组完整；新完整验证选中paired-bandit；最终12/12任务结局已知且evaluation_valid=true。学习策略实际分配7任务、决策7次、提醒3次，有效提醒概率范围[0,.9914369772466252]；no_memory分配5任务。源历史/回放、配对和单臂原始JSON hash不变，选择锁和最终报告重核一致。开发期dev01失败（示例响应字段名错误）与dev02旧协议演示均原样保留，不能当作最终兼容验收产物。全部为离线fixture，0真实模型/容器/benchmark请求。
+
+范围：no_memory确实不检索/编码/构造记忆特征/gate/预留提醒槽，普通actor成本完整计入；结构性零只指干预风险和局部gate开销。v/ρ/e是选中检查点描述，未完成决策仍未知。纯单臂DR统计可独立运行，但单臂bandit/freeze仍需兼容配对model/calibration/warm_gate；纯单臂从零初始化/校准未实现。紧凑特征、局部actor调用预算、组级诊断界、共用来源库、最终单臂无个体H/rescue等限制保持明确。真实pilot/自然与四格/噪声库/第二actor/外部原系统复现/Inspect仍未完成。代码未提交、未推送，服务器需取得完成版本后另行准备真实运行。
+
+## 2026-11-16 — P4-04 最终冻结 test 软件路径
+
+| 文件 | 本卡变更 |
+| --- | --- |
+| `src/cave_mem_v3/policy/final_evaluation.py` | 两类选择锁编为自包含最终计划、组分配/身份/资产/顺序/目录冻结；完整task指标、HT、ESS、组bootstrap与分层，身份未知停用推断 |
+| `src/cave_mem_v3/policy/final_rollout.py` | 独立真实test角色/原始协议，指定任务的活会话执行与重核，运行不读历史结局 |
+| `src/cave_mem_v3/policy/rollout.py` | 私有会话重核支持明确test schema，默认validation不变 |
+| `src/cave_mem_v3/target_data/sampling.py` | test采样需已验证最终计划与任务/策略授权，旧默认仍拒绝test |
+| `src/cave_mem_v3/interventions/single.py`、`single_outcomes.py` | 活前缀及只读重核传递相同最终授权 |
+| `src/cave_mem_v3/cli.py` | plan-final-evaluation、collect-final-evaluation、report-final-evaluation；无效/未完成非零退出，完整重读零provider |
+| `tests/test_final_evaluation.py` | 14 项双锁、原始来源搬走仍可执行、组分配/HT、角色/预算/未知/身份/pending/CLI测试 |
+| `docs/evaluation.md`、`docs/task_cards.md`、`CHANGELOG.md` | 最终协议、统计与边界、验收记录 |
+
+两项审核通过：工程44项及独立CLI/HT复核；研究14项、追加2项和身份漂移探针。实现78项相关检查通过，根 agent 最终全量 **346 项通过（191.183 秒）**。根 agent 在 `runs/p4-04-fixture-20261116/` 建立最终计划并执行13个fixture任务（12个独立组，一组2任务），两策略概率 .5/.5，allocation42/bootstrap43，30 bootstrap、min2组，完整观察13任务并重核报告一致。角色确为test，所有数据仍是软件fixture，0外部请求。
+
+未知分配结果/费用保留，正式总体指标不补零；不完整或未知/漂移模型身份停用总体/分层推断，保留描述。HT可能越出[0,1]不剪裁；组bootstrap不是精确随机化或多重比较保证。实际按策略批次执行顺序已冻结，外部时间影响不被自动排除。验证的风险证据不冒称test H。学习策略完整原始链路与no_memory基线由最后I-01补齐；未运行真实测试/提交/推送。
+
+## 2026-11-16 — P4-03 不可恢复保守选型
+
+| 文件 | 本卡变更 |
+| --- | --- |
+| `src/cave_mem_v3/policy/conservative_selection.py` | 独立前瞻计划/完整live候选/最坏风险与调用界/不可覆盖选择锁，不调用目标恢复 |
+| `src/cave_mem_v3/policy/selection.py` | 配对协议同步修复逐响应实际身份未知门禁；未知候选或审核不能选出赢家 |
+| `src/cave_mem_v3/cli.py` | plan-conservative-selection、collect-conservative-selection、select-conservative-policy |
+| `tests/test_conservative_selection.py` | 10 项非恢复、公式、分母、未知/不可行/旧结果替换/身份与 CLI 测试 |
+| `tests/test_policy_selection.py` | 追加两项部分未知live身份与配对审核未知身份回归 |
+| `docs/evaluation.md`、`docs/task_cards.md`、`CHANGELOG.md` | 明确保守协议与实际身份门禁、验收记录 |
+
+研究8项及增量4项/零调用预算探针、工程45项相关检查通过；根 agent 最终全量 **332 项通过（113.592 秒）**。`runs/p4-03-fixture-20261116/` 中3个独立任务、两个冻结候选完成非恢复完整验证，宽松fixture预算下选择remind；锁当前代码重核一致。旧配对示例锁同样重核通过。无目标恢复接口调用，0外部模型请求。
+
+风险使用实际π的h=1最坏界；调用使用原始草稿1+π×剩余调用界，非观测H/反事实费用，也非完整任务费用上界。每个实际响应 model/fingerprint 必须完整一致，未知阻止全计划选型，不借其他候选已知身份补值；真实服务缺指纹仍需解决，不能补造。旧完整身份锁兼容，未知旧锁保留但不能冒称新门禁通过。test尚未执行。
+
+## 2026-11-16 — P4-02 独立完整验证选型
+
+| 文件 | 本卡变更 |
+| --- | --- |
+| `src/cave_mem_v3/policy/selection.py` | 前瞻计划、所有候选完整验证、内部计划绑定、独立配对风险/调用审核、固定排名、不可覆盖选择锁及重核 |
+| `src/cave_mem_v3/policy/frozen.py` | 冻结包保存训练/校准原始目录保护范围 |
+| `src/cave_mem_v3/target_data/collection.py` | 可选 config_identity 在 prepared run 哈希前写入，旧默认保持原形态 |
+| `src/cave_mem_v3/cli.py` | plan-policy-selection、collect-policy-selection、select-policy |
+| `tests/test_policy_selection.py` | 16 项完整选择、无可行/缺失阻断、路径与身份、风险零事件、旧审核替换、选择锁测试 |
+| `docs/evaluation.md`、`docs/task_cards.md`、`CHANGELOG.md` | 协议、统计解释、验收与下一卡 |
+
+两项独立审核通过：工程最终47项相关测试，研究15项及最终新增差异2项。根 agent 最终全量 **320 项通过（88.278 秒）**。根 agent 使用非论文fixture原始轨迹形态，在 `runs/p4-02-fixture-20261116/` 冻结2候选、每候选3独立任务、risk_limit=1、调用预算5、30 bootstrap；全部完整观察，脚本 remind 胜出，选择锁重核一致。仅验证软件，没有以测试阈值作研究选择，0外部模型请求。
+
+修复了上下文样本零提醒被误称全局零风险、未完成候选被跳过，以及旧配对产物可通过旁边绑定文件替换的问题。现在原始 prepared 哈希绑定计划；全登记候选缺证据则无赢家，只有真正恒Silent规则可结构性零风险。bootstrap/有限组修正是有假设的经验诊断；配对审核是独立检查点证据，非live个体反事实。当前协议需要恢复，因此下一卡提供不可恢复的独立保守方案；test尚未开放。
+
+## 2026-11-16 — P4-01 冻结包与完整验证任务
+
+| 文件 | 本卡变更 |
+| --- | --- |
+| `src/cave_mem_v3/policy/frozen.py` | 自包含冻结规则/学习包，编包审计，实际策略/后置规则与原始有效概率，身份绑定 |
+| `src/cave_mem_v3/policy/rollout.py` | selection 完整活会话、所有计划分母、局部判断耗时、journal/pending、原始日志重核及零调用重入 |
+| `src/cave_mem_v3/interventions/execution.py` | 独立 opt-in frozen policy 执行模式；零剩余调用可执行缓存 a0，旧协议不变 |
+| `src/cave_mem_v3/interventions/single_outcomes.py` | 新执行模式对应的只读验证；旧单臂默认校验不变 |
+| `src/cave_mem_v3/cli.py` | freeze-policy、collect-policy-validation、summarize-policy-validation，完整重入在模型加载前检查 |
+| `tests/test_policy_rollout.py` | 17 项完整分母/预算/记忆/未知/权限/瞬时提醒/冻结身份/重入/篡改测试 |
+| `examples/phase4_validation_demo.py` | 冻结 Silent/Always-remind 后运行完整验证任务；无赢家或 test |
+| `docs/evaluation.md`、`docs/architecture.md` | 冻结评估行为与现有第三部分模块说明 |
+| `docs/task_cards.md`、`CHANGELOG.md` | 验收与下一卡 |
+
+研究15项检查及最终工程48项相关检查通过；根 agent 全量 **304 项通过（57.893 秒）**。`examples/phase4_validation_demo.py --output runs/p4-01-fixture-20261116` 完成两个策略，每个1任务，均有观察终局；脚本 Silent失败、Always-remind成功，不选赢家。0外部请求，全部 fixture，未读取 test。
+
+gate/后置规则/提醒构造耗时独立记录且计入一次；无记忆/R0缓存动作仍执行，未选中任务正常完成。原始配置、能力、协议、事件和费用重核，pending不重试，CLI重入不加载encoder/provider。学习证据不足的包可以明确强制 Silent，不能声称训练成功。相同后置规则可能改变训练策略成本，训练经验可行性不继承；单活会话不产生 H/rescue，下一卡另接独立匹配审核。
+
+## 2026-11-16 — P3-05 风险与调用预算约束 bandit
+
+| 文件 | 本卡变更 |
+| --- | --- |
+| `src/cave_mem_v3/policy/bandit.py` | 同容量二元策略、配对/DR 分别优化、KL、固定组 bootstrap 上界/梯度、非负对偶更新、无风险对照、实际草稿调用审计、掩码分母与候选验证 |
+| `src/cave_mem_v3/cli.py` | train-bandit 显式配置与输入，输出训练状态/候选 |
+| `tests/test_bandit_policy.py` | 13 项梯度、KL、约束抑制、掩码、成本、未知、篡改与原始产物 CLI 测试 |
+| `docs/policy.md`、`docs/task_cards.md`、`CHANGELOG.md` | 约束单位/语义、验收与下一卡 |
+
+一名实现、两名审核；各自 13 项针对性及独立有限差分/对偶/成本检查通过，最大梯度误差小于 1.8e-10。最终全量 **287 项通过（45.801 秒）**，diff 检查通过。主 agent 运行真实产物形态的 CLI 到 `runs/p3-05-fixture-20261116/candidate.json` 并重新加载一致：配对、风险限 .1、selected_gate_actor_calls 预算2、10轮/10 bootstrap；初始 gate 支持不足返回 unavailable/warm_gate_unavailable，未假造候选。有效拟合与约束抑制另由已知数值关系测试验证，全部为软件检查，0 外部请求。
+
+首版预算只约束选中草稿的一次 actor 调用加提醒增量续跑调用，不包含完整前缀、Silent 基础续跑、token、耗时、费用或本地计算。配对 Δcalls 允许负值；单臂采用剩余调用保守上界及 h=1 最坏情况界，不伪造反事实。资格不足行保留 c0 与分母，未知记录阻止生成候选。只有最后迭代的经验可行性，未按验证集选赢家，没有部署授权或统计安全保证。
+
+## 2026-11-16 — P3-04 单臂交叉拟合与 DR
+
+| 文件 | 本卡变更 |
+| --- | --- |
+| `src/cave_mem_v3/policy/dr.py` | 按实际依赖组固定折叠，折内归一化与 μ0/μ1；式 8 价值、相对 Silent 改进、伪效用、原始/截断权重、ESS、分母及只读重建 |
+| `src/cave_mem_v3/cli.py` | estimate-single-dr 入口，显式读取冻结诊断参数 |
+| `tests/test_single_dr.py` | 12 项手算/数值、分折隔离、未知、缺支持、概率、极端权重与 API/CLI 测试 |
+| `docs/policy.md`、`docs/task_cards.md`、`CHANGELOG.md` | 单臂统计解释与验收记录 |
+
+一名实现、两名独立审核；两位审核各自 12 项测试及额外手算/重复组/极端权重检查通过。最终全量 `.venv/Scripts/python.exe scripts/run_tests.py` **274 项通过（40.964 秒）**。主 agent 从旧单臂原始数据通过 CLI 生成并重读 `runs/p3-04-fixture-20261116/dr-report.json`：p=.5、2 folds、每臂至少2组、seed42、L2=.01、截断10/100；一个计划样本保留，因仅一个独立组而 unavailable，价值 None，未补造对照臂或 H。该演示全为软件 fixture，0 外部模型请求。报告元数据后续补充缺失机制说明，较早演示按其原内容保留；最终代码另生成 `dr-report-final.json` 并重核一致，仍为不足支持状态。
+
+限制：等组可用检查点诊断，不是自然任务总体价值；完整案例选择可能破坏随机化，需要缺失机制假设。截断偏移不是识别出的偏差界；配置先于加载并不证明事先未看结果；自适应训练策略仍需独立完整 rollout。单臂不产生已观测个体伤害，无真实实验。
+
+## 2026-11-16 — P3-03 配对建模、独立校准和初始 gate
+
+| 文件 | 本卡变更 |
+| --- | --- |
+| `src/cave_mem_v3/policy/features.py` | 冻结向量与结构化列契约，三值/置信度分类、缺失标记、维度/数值校验 |
+| `src/cave_mem_v3/policy/supervised.py` | 按头掩码与组权重拟合 ridge/logistic，训练归一化、数值收敛、身份和 JSON 模型 |
+| `src/cave_mem_v3/policy/calibration.py` | 独立校准，按实际组轴查泄漏，预测范围与风险分箱上界，支持不足及统计重核 |
+| `src/cave_mem_v3/policy/gate.py` | 基于校准收益/风险为训练 x 生成目标，拟合同容量初始 gate，不足支持 Silent |
+| `src/cave_mem_v3/cli.py` | train-policy、calibrate-policy、train-initial-gate、predict-policy |
+| `tests/test_supervised_policy.py` | 13 项数值、掩码、角色、身份、支持、篡改、依赖和 API/CLI 集成测试 |
+| `examples/phase3_supervised_demo.py` | 第一二部分原始 fixture 产物到第三部分模型/校准/gate 的离线链路 |
+| `pyproject.toml` | 新增可选 policy NumPy 依赖 |
+| `docs/policy.md` | 使用命令、模型/校准含义与统计限制 |
+| `docs/server_handoff.md` | 标明旧已发布分支交接的历史范围，避免误认本地新代码已上传 |
+| `README.md`、`docs/task_cards.md`、`CHANGELOG.md` | 状态、命令链接、验收和下一卡记录 |
+
+一名实现、两名审核。研究/工程各自 13 项针对性测试与独立数值/反例检查通过；主 agent 使用 `.venv/Scripts/python.exe scripts/run_tests.py` **262 项通过（40.379 秒）**，diff 检查通过。Python 3.14.8 / NumPy 2.5.4，NumPy 已安装于项目忽略的 `.venv`，实现验证期间系统 Python 也安装了该版本。`python -S -m cave_mem_v3 --help` 在无 site-packages 下可用，调用建模函数明确提示安装 policy extra。
+
+根 agent 运行 `examples/phase3_supervised_demo.py --output runs/p3-03-fixture-20261116`，所有产物保留，小样本各头与 gate 为 unavailable，最终 Silent/warm_gate_unavailable；外部模型请求 0。真实拟合能力另外由已知关系测试验证，不能把此示例当作有效研究模型。未运行真实采集或选择研究阈值。
+
+限制：线性/logistic 轻量特征基线；收益/成本是实现值预测范围，不是条件均值置信区间，风险分箱组级上界不是逐点安全保证；等组权重不是自然部署频率。当前只有增量成本，shared 前缀不冒称 c0。单臂 DR、约束 bandit、完整验证 rollout 和冻结部署仍待后续卡。
+
+## 2026-11-16 — P3-02 独立校准与选型数据入口
+
+一名实现、两名独立只读审核。配对与在线单臂均支持显式 validation 子角色；默认训练入口拒绝验证数据，test 在采集/读取结局之前被拒绝；旧训练产物不改标。
+
+| 文件 | 本卡变更 |
+| --- | --- |
+| `target_data/partitions.py` | 新增角色、子角色、任务子集、重入与来源库前置门禁 |
+| `target_data/collection.py` | 准备记录绑定验证子角色，提前验证来源库 |
+| `interventions/inputs.py` | 输入加载按冻结分区核对任务与轨迹 |
+| `interventions/single.py` | 在线单臂按显式分区采样并冻结角色 |
+| `interventions/collection.py` | 配对计划继承验证分区元数据 |
+| `interventions/outcomes.py`、`single_outcomes.py` | 读取前拒绝错误分区，汇总保持验证绑定 |
+| `policy/dataset.py` | 每个导出只接收一个显式分区；保留 train v1，validation 使用 v2 |
+| `cli.py` | 采集和导出增加 validation-role，缺少子集时提前失败 |
+| `tests/test_validation_partitions.py` | 新增 13 项分区、双路线、CLI、未知、泄漏与重入测试 |
+| `tests/test_single_execution.py` | 内部测试 fixture 显式添加原有 target_train 角色 |
+| `README.md`、`docs/task_cards.md`、`CHANGELOG.md` | 命令、验收和下一卡记录 |
+
+上述源码路径均在 `src/cave_mem_v3/` 下。部分分区编辑已发生在本卡哈希快照前，因此文件列表结合完整差异报告。工程独立审核 58 项针对性及追加 16 项回归通过；研究审核 27 项及两个验证子集的 pending 探针通过。主 agent 首次全量发现三个旧测试 helper 缺 role，保留失败日志并修正 helper，最终 `python scripts/run_tests.py` **249 项通过（36.943 秒）**。旧 P3-01 两份最终 v1 数据集重新加载与原记录完全一致，`git diff --check` 通过。四条验证 CLI 路线仅使用 fixture；没有真实请求、训练或策略选型。
+
+## 2026-11-16 — P3-01 第三部分只读数据入口
+
+在分支 `codex/phase3-goal-workflow`、基线 `e3a6ef891f47a1cfd779eb710ed9bf0fd46bd398` 上按用户新要求使用一名实现 agent、两名独立只读审核 agent。先更新逐卡连续执行规则，然后只实施 P3-01，验收后才定义 P3-02。
+
+| 文件 | 本卡变更 |
+| --- | --- |
+| `src/cave_mem_v3/policy/__init__.py` | 新增策略模块入口 |
+| `src/cave_mem_v3/policy/dataset.py` | 从原始 prepared/paired/single 记录构建可复读的数据视图，隔离特征/标签/成本/来源；重核实际模型身份、实验条件、分组、重复与未知，独立标签掩码及费用有效性；独占导出，加载时重核原始证据 |
+| `src/cave_mem_v3/cli.py` | 新增 `build-policy-dataset --paired RUN PREPARED --single RUN --output FILE` |
+| `tests/test_policy_dataset.py` | 16 项数据入口、篡改、身份、分区、未知费用、分母和只读测试 |
+| `AGENTS.md` | 持久化一写两审及验收后自动逐卡推进的最新授权 |
+| `docs/software_goal.md` | proposal 与四张流程图到代码的依赖地图、完成判据和真实研究边界 |
+| `docs/task_cards.md` | 完成 P3-01、记录验收与下一张卡 |
+| `README.md` | 增加数据构建命令与原始来源要求 |
+| `CHANGELOG.md` | 本条文件、验证与限制记录 |
+
+验证：16 项针对性测试及 `python scripts/run_tests.py` 的 236 项全量测试通过，研究/工程两项独立审核通过，`git diff --check` 通过。既有 S2-01/S2-02 离线示例分别生成 `runs/p3-01-fixture-20261116/paired-dataset-final.json` 和 `single-dataset.json`，最终代码复读一致且原始文件字节不变；较早的 `paired-dataset.json` 因费用状态字段补全而被最终加载器拒绝，原文件保留未覆盖。两示例的来源库/manifest 不同，因此混合导出被正确拒绝。配对标签为 `D=.97, H=0, rescue=1`，单臂为 `Y=true, R=.96`，全部仍标记 fixture。准备失败费用为 `None/unavailable_not_validated`，附原始轨迹路径与哈希，未当作零。
+
+限制：本卡仅接收现有 target_train 产物；保持原始 run 和任务资产可访问才能复读，不提供只有摘要的弱校验加载。不同配置、来源库和实际服务身份不静默混用；共享库下的结果不代表来源留出。没有训练、真实模型调用或正式数据采集。
+
 ## 2026-11-15 — S2-02 不可配对目标的随机单臂采集
 
 在 `ee97ac12d4e43d4f168e6ce2acb5f2196c1a56f5` 基础上使用分支 `codex/s2-single-arm`；两名实现 agent、一名独立审核 agent 协作，主 agent 集成验证。保留开始前所有未提交改动；未提交或推送。本条只列 S2-02 相对开始时工作区的新增/修改。

@@ -106,7 +106,7 @@ class SingleExecutionTests(unittest.TestCase):
     def prepare(self, env, actor, *, probability=1e-9, encoder=None):
         encoder = encoder or EncoderFixture()
         events = []
-        run = {"record_hash": "frozen", "study": plain(StudySpec(max_steps=4, max_model_calls=4)),
+        run = {"record_hash": "frozen", "role": "target_train", "study": plain(StudySpec(max_steps=4, max_model_calls=4)),
             "actor_config": actor.configuration(), "environment_configs": {"fixture": env.configuration()},
             "encoder_identity": copy.deepcopy(encoder.identity), "exposure_rules": None,
             "risk_hazard": plain(RiskHazard(low_risk_probability=probability, high_risk_probability=probability))}

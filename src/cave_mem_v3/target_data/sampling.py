@@ -91,8 +91,17 @@ class OnlineCheckpointSampler:
     """
 
     def __init__(self, *, role: str, task_id: str, trace_id: str, seed: int,
-                 hazard: RiskHazard | None = None):
-        if role not in ("target_train", "validation"):
+                 hazard: RiskHazard | None = None, final_authorization=None):
+        if role == "test":
+            from cave_mem_v3.policy.final_evaluation import validate_final_evaluation_plan, final_policy_tasks
+            if not isinstance(final_authorization, dict) or set(final_authorization) != {"plan", "policy_id"}:
+                raise ValueError("test sampling requires a frozen final evaluation plan authorization")
+            final_plan = validate_final_evaluation_plan(final_authorization["plan"])
+            if task_id not in {t["task_id"] for t in final_policy_tasks(final_plan, final_authorization["policy_id"])}:
+                raise ValueError("test task is not assigned to this frozen final policy")
+        elif final_authorization is not None:
+            raise ValueError("final authorization only applies to test tasks")
+        elif role not in ("target_train", "validation"):
             raise ValueError("checkpoint sampling is allowed only for target_train or validation")
         if not isinstance(task_id, str) or not task_id or not isinstance(trace_id, str) or not trace_id:
             raise ValueError("task_id and trace_id are required")
@@ -273,3 +282,19 @@ def select_first_checkpoint(steps: Iterable[dict], *, role: str, task_id: str,
             "action", "result", "validation_error", "valid", "tool_error") if key in step})
         ordinal += 1
     return sampler.finalize()
+
+
+class OrdinaryActorSampler(OnlineCheckpointSampler):
+    """Explicitly disabled checkpoint selection for the no-memory actor baseline.
+
+    Retains role/final-plan authorization and original journal bookkeeping, but
+    never computes risk, draws a checkpoint, retrieves memory, or reserves calls.
+    """
+    def consider(self, context, checkpoint, index, prior_steps=None, checkpoint_hash=None):
+        return {"status": "disabled_no_memory", "selected": False, "decision": None}
+
+    def finalize(self):
+        return {"schema_version": "ordinary-actor-sampling-disabled.v1", "role": self.role,
+            "task_id": self.task_id, "trace_id": self.trace_id, "seed": self.seed,
+            "status": "disabled_no_memory", "selected_step_index": None,
+            "reason": "ordinary_actor_full_budget_no_retrieval_no_gate"}

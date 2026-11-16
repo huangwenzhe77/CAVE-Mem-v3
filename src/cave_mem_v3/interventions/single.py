@@ -1,5 +1,6 @@
 """Randomized single-arm collection in one live session, without cloning."""
 from __future__ import annotations
+from cave_mem_v3.target_data.partitions import target_partition, partition_fields, partition_tasks, check_partition_resume
 
 import copy
 import random
@@ -18,7 +19,7 @@ from cave_mem_v3.memory_generation.replay import require_current_evidence
 from cave_mem_v3.target_data.collection import _close, _exclusive_json
 from cave_mem_v3.target_data.pre_treatment_state import build_pre_treatment_state, validate_exposure_rules
 from cave_mem_v3.target_data.retrieval import retrieve_memory
-from cave_mem_v3.target_data.sampling import OnlineCheckpointSampler, RiskHazard
+from cave_mem_v3.target_data.sampling import OnlineCheckpointSampler, OrdinaryActorSampler, RiskHazard
 
 
 PROTOCOL = "live_session_single_randomized.v1"
@@ -100,8 +101,11 @@ def _prepare_live(run, task, trace_id, seed, env, actor, encoder, emit, expected
               "task_id": task["task_id"], "trace_id": trace_id, "seed": seed,
               "status": "error", "steps": [], "costs": costs, "response_identity": identity,
               "error": None, "selection": None}
-    sampler = OnlineCheckpointSampler(role="target_train", task_id=task["task_id"],
-        trace_id=trace_id, seed=seed, hazard=RiskHazard(**run["risk_hazard"]))
+    no_memory = run.get("bundle", {}).get("policy_config", {}).get("kind") == "no_memory"
+    sampler_type = OrdinaryActorSampler if no_memory else OnlineCheckpointSampler
+    sampler = sampler_type(role=run["role"], task_id=task["task_id"],
+        trace_id=trace_id, seed=seed, hazard=RiskHazard(**run["risk_hazard"]),
+        final_authorization=run.get("final_authorization"))
     spec = StudySpec(**run["study"])
     pending = None
     finalization_seconds = 0.0
@@ -117,7 +121,7 @@ def _prepare_live(run, task, trace_id, seed, env, actor, encoder, emit, expected
     def frozen():
         if actor.configuration() != run["actor_config"] or env.configuration() != run["environment_configs"][task["task_id"]]:
             raise _IdentityError("frozen live actor/environment configuration changed")
-        if encoder.identity != run["encoder_identity"]:
+        if not no_memory and encoder.identity != run["encoder_identity"]:
             raise _IdentityError("frozen encoder identity changed")
     def grade_stopped_prefix():
         terminal, success = env.terminal_status()
@@ -331,11 +335,10 @@ def _input(run, task, preparation):
 
 def collect_single_target(manifest, *, bank, role="target_train", spec, env_factory,
                           actor_factory, output_dir, encoder, hazard=None, exposure_rules=None,
-                          assignment_probability):
+                          assignment_probability, validation_role=None):
     """Freeze and randomize once, continue that same session, never retry attempts."""
     from cave_mem_v3.interventions.single_outcomes import summarize_target_single
-    if role != "target_train":
-        raise ValueError("single-arm collection is restricted to target_train")
+    check_partition_resume(output_dir, role, validation_role)
     probability = finite(assignment_probability, "assignment_probability", minimum=0)
     if isinstance(assignment_probability, bool) or not 0 < probability < 1:
         raise ValueError("both single-arm logging probabilities must be strictly positive")
@@ -352,7 +355,7 @@ def collect_single_target(manifest, *, bank, role="target_train", spec, env_fact
     validate_exposure_rules(exposure_rules)
     if not isinstance(getattr(encoder, "identity", None), dict) or not encoder.identity:
         raise ValueError("single-arm collection requires a frozen encoder identity")
-    tasks = sorted((copy.deepcopy(t) for t in manifest["tasks"] if t["role"] == role), key=lambda t: t["task_id"])
+    tasks = sorted(copy.deepcopy(partition_tasks(manifest, role, validation_role)), key=lambda t: t["task_id"])
     if not tasks:
         raise ValueError("manifest has no target_train tasks")
     random.Random(spec.base_seed).shuffle(tasks)
@@ -360,7 +363,7 @@ def collect_single_target(manifest, *, bank, role="target_train", spec, env_fact
     root = Path(output_dir)
     if (root / "run.json").exists():
         stored = checked(read_json(root / "run.json"), schema="target-single-run.v1")
-        fixed = {"manifest": manifest, "bank": bank, "study": plain(spec), "role": role,
+        fixed = {"manifest": manifest, "bank": bank, "study": plain(spec), "role": role, **partition_fields(role, validation_role),
                  "task_order": [task["task_id"] for task in tasks], "risk_hazard": plain(hazard),
                  "encoder_identity": encoder.identity, "exposure_rules": exposure_rules,
                  "assignment_probability": probability, "protocol": PROTOCOL}
@@ -408,7 +411,7 @@ def collect_single_target(manifest, *, bank, role="target_train", spec, env_fact
         _close(actor)
     run = seal({"schema_version": "target-single-run.v1", "manifest": manifest,
         "manifest_hash": manifest["manifest_hash"], "bank": bank, "bank_hash": bank["bank_hash"],
-        "study": plain(spec), "role": role, "task_order": [t["task_id"] for t in tasks],
+        "study": plain(spec), "role": role, **partition_fields(role, validation_role), "task_order": [t["task_id"] for t in tasks],
         "actor_config": actor_config, "actor_capabilities": actor_capabilities,
         "environment_configs": configs, "environment_capabilities": capabilities,
         "risk_hazard": plain(hazard), "encoder_identity": encoder.identity,

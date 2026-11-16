@@ -6,6 +6,7 @@ import json
 import random
 from pathlib import Path
 from typing import Callable
+from cave_mem_v3.target_data.partitions import target_partition, partition_fields, partition_tasks, check_partition_resume, validate_validation_bank
 
 from cave_mem_v3.benchmarks.tasks import validate_manifest
 from cave_mem_v3.common.contracts import StudySpec, digest, plain, read_json, stage_seed, write_json
@@ -34,7 +35,8 @@ def collect_target(manifest: dict, *, role: str, spec: StudySpec,
                    output_dir: str | Path, hazard: RiskHazard | None = None,
                    episode_runner: Callable | None = None,
                    prepare_before_action: bool = False, bank: dict | None = None,
-                   encoder=None, exposure_rules: dict | None = None) -> dict:
+                   encoder=None, exposure_rules: dict | None = None, validation_role: str | None = None,
+                   config_identity: str | None = None) -> dict:
     """Run one fixed rollout per registered target task and retain each sample.
 
     A fresh sampler is created for each task rollout. In preparation mode, the
@@ -42,8 +44,9 @@ def collect_target(manifest: dict, *, role: str, spec: StudySpec,
     that action is validated or executed. The episode then stops without a
     target outcome. The default collection mode retains the original behavior.
     """
-    if role not in ("target_train", "validation"):
-        raise ValueError("target collection role must be target_train or validation")
+    check_partition_resume(output_dir, role, validation_role)
+    if config_identity is not None and (not isinstance(config_identity, str) or not config_identity):
+        raise ValueError("target collection config_identity must be a nonempty immutable identity")
     if type(prepare_before_action) is not bool:
         raise ValueError("prepare_before_action must be boolean")
     if prepare_before_action:
@@ -53,7 +56,9 @@ def collect_target(manifest: dict, *, role: str, spec: StudySpec,
             raise ValueError("pre-treatment preparation requires a frozen embedding encoder")
         validate_exposure_rules(exposure_rules)
     validate_manifest(manifest, verify_assets=True)
-    tasks = [copy.deepcopy(task) for task in manifest["tasks"] if task["role"] == role]
+    tasks = copy.deepcopy(partition_tasks(manifest, role, validation_role))
+    if role == "validation" and prepare_before_action:
+        validate_validation_bank(manifest, bank)
     if not tasks:
         raise ValueError(f"manifest has no {role} tasks")
     tasks.sort(key=lambda task: task["task_id"])
@@ -77,12 +82,14 @@ def collect_target(manifest: dict, *, role: str, spec: StudySpec,
             _close(env)
 
     run = {"schema_version": "target-run.v1", "manifest_hash": manifest["manifest_hash"],
-           "manifest": copy.deepcopy(manifest), "role": role,
+           "manifest": copy.deepcopy(manifest), "role": role, **partition_fields(role, validation_role),
            "schedule_policy": "one_rollout_per_task.v1", "rollouts_per_task": 1,
            "study": plain(spec), "risk_hazard": plain(hazard),
            "actor_config": actor_config, "actor_capabilities": actor_capabilities,
            "environment_configs": env_configs, "environment_capabilities": env_capabilities,
            "task_order": [task["task_id"] for task in tasks]}
+    if config_identity is not None:
+        run["config_identity"] = config_identity
     if prepare_before_action:
         run["pre_treatment"] = {
             "mode": "freeze_before_selected_action_execution.v1",
@@ -125,7 +132,8 @@ def collect_target(manifest: dict, *, role: str, spec: StudySpec,
             if (trace.get("trace_hash") != digest({k: v for k, v in trace.items() if k != "trace_hash"})
                     or trace.get("run_hash") != run["run_hash"]
                     or trace.get("trace_id") != trace_id or trace.get("task_id") != task["task_id"]
-                    or trace.get("role") != role or trace.get("seed") != seed):
+                    or trace.get("role") != role or trace.get("validation_role") != validation_role
+                    or trace.get("seed") != seed):
                 raise ValueError("target trace identity or checksum mismatch")
             if _identity_conflicts(trace["episode"], response_reference):
                 raise ValueError("stored target rollouts have inconsistent response identity")
@@ -210,6 +218,7 @@ def _summary(run: dict, traces: list[dict]) -> dict:
                           for episode in episodes)
     result = {"schema_version": "target-summary.v1", "run_hash": run["run_hash"],
               "manifest_hash": run["manifest_hash"], "role": run["role"],
+              **partition_fields(run["role"], run.get("validation_role")),
               "planned_rollouts": len(run["task_order"]), "attempted_rollouts": len(traces),
               "successful_rollouts": sum(e.get("success") is True for e in episodes),
               "failed_rollouts": sum(e.get("success") is False and e.get("status") != "error" for e in episodes),

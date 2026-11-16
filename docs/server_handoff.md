@@ -1,5 +1,7 @@
 # CAVE-Mem-v3 服务器交接
 
+> 2026-11-16 本地开发说明：下文是已发布 `codex/s2-single-arm` 的历史交接快照。四部分新软件交接见 [software_handoff.md](software_handoff.md)，对应本地 `codex/phase3-goal-workflow`，尚未提交/推送，不能假设远端已有这些改动。当前进度以 `docs/task_cards.md` 和 `CHANGELOG.md` 为准；新的开发协作为一名实现、两名独立审核。真实采集不在本次软件目标中自动启动。下文旧测试数量、实现范围和协作人数仅记录旧版本。
+
 更新于 2026-11-15。本文件对应 GitHub 分支 `codex/s2-single-arm`。克隆后运行
 `git rev-parse HEAD` 固定实际提交；不要仅凭分支名标识实验版本。
 
