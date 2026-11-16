@@ -200,7 +200,7 @@ def parse_verifier_result(directory: str | Path, *, success_threshold: float = 1
             for status in ("passed", "failed", "skipped", "pending"):
                 if summary.get(status, 0) != sum(t["status"] == status for t in tests):
                     raise ValueError("summary and actual test statuses differ")
-            infrastructure = re.compile(r"\b(setup|teardown|collection)\b.*\b(error|failed|exception)\b|\b(failed|error)\b.*\b(setup|teardown|collection)\b|\b(importerror|modulenotfounderror)\b", re.I)
+            infrastructure = re.compile(r"\b(setup|teardown|collection)\b.*\b(error|failed|exception)\b|\b(failed|error)\b.*\b(setup|teardown|collection)\b", re.I)
             for test in tests:
                 metadata = " ".join(str(test.get(k, "")) for k in ("rawStatus", "raw_status", "message", "trace"))
                 if str(test.get("rawStatus", test.get("raw_status", ""))).lower() == "error" or infrastructure.search(metadata):

@@ -167,6 +167,10 @@ class TerminalTests(unittest.TestCase):
                                "tests": [{"name": "result", "status": "failed"}]}}
         (self.root / "ctrf.json").write_text(json.dumps(result), encoding="utf-8")
         self.assertFalse(parse_verifier_result(self.root)["success"])
+        result["results"]["tests"][0]["message"] = "The test failed in the call phase"
+        result["results"]["tests"][0]["trace"] = "ImportError: agent output module is missing"
+        (self.root / "ctrf.json").write_text(json.dumps(result), encoding="utf-8")
+        self.assertFalse(parse_verifier_result(self.root)["success"])
         result["results"]["tests"][0]["message"] = "setup failed with ImportError"
         (self.root / "ctrf.json").write_text(json.dumps(result), encoding="utf-8")
         with self.assertRaises(TerminalInfrastructureError):

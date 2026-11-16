@@ -11,9 +11,12 @@
 | `src/cave_mem_v3/cli.py` | 增加判定及汇总命令，数据集支持 `--exposure RUN LABELS`；支持冻结 manifest 外的逐任务恢复审核映射和目标审核诊断 |
 | `tests/test_target_prepare.py`、`tests/test_posthoc_exposure.py`、`tests/test_terminal.py` | 覆盖格式错误阻断、配对盲判、单臂不标注、教师无效响应保留及外置审核映射 |
 | `tests/test_policy_dataset.py` | 路径身份断言解析 Windows 长短路径别名 |
+| `src/cave_mem_v3/environments/terminal.py` | CTRF 将测试执行阶段的 agent 产物缺失视为任务失败；setup、collection、teardown 错误仍拒绝评分 |
 | `README.md`、`CHANGELOG.md` | 记录新命令、事后标签语义和文件变更 |
 
 本地完整离线检查先有 378 项通过，审核映射新增后再复测。H20 真实来源批次 `phase1-batch-20261116-r00` 的原始结果为 5 次尝试、4 次明确任务失败、1 次评分器故障；DeepSeek 为 4 条合格轨迹生成 3 条候选，1 条输出截断。此前 `verify` 因选错 manifest 版本在模型执行前退出；本次按采集哈希匹配的 `manifest-final-v3.json` 启动独立回放，旧日志保留。真实回放和目标数据尚须以最终产物统计，不能由离线测试推断通过率。
+
+原 `fix-code-vulnerability` 诊断保留了官方 `reward=0` 与 6 条 CTRF 测试记录，其中 4 条在 call 阶段失败、2 条通过。旧解析器因失败堆栈中的 `ImportError` 误判为基础设施错误；新解析器对该原始诊断返回明确任务失败，并保留 setup/collection/teardown 门禁。旧历史轨迹不追溯改写；新运行才采用修正规则。
 
 ## 2026-11-16 — R-01 离线学习 fixture 的可识别风险样本
 
