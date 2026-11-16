@@ -5,9 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "cave-mem-v3"
 version = "0.3.0"
-description = "Replay-backed source failure memories for CAVE-Mem, proposal section 3.1"
+description = "Auditable source memories, target interventions, policy learning and frozen task evaluation"
 requires-python = ">=3.11"
 dependencies = []
+
+[project.optional-dependencies]
+policy = ["numpy>=1.26,<3"]
+encoder = ["sentence-transformers>=3,<6"]
 
 [project.scripts]
 cave3 = "cave_mem_v3.cli:main"

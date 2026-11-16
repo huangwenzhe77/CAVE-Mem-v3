@@ -23,6 +23,37 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(result, expected, stderr.getvalue())
         return json.loads(stdout.getvalue()) if result == 0 else stderr.getvalue()
 
+    def test_target_rollout_samples_once_then_continues_and_resumes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "manifest.json"
+            output = root / "target-run"
+            config = ROOT / "configs" / "phase1" / "demo.toml"
+            self.invoke("manifest", "--catalog", ROOT / "configs" / "benchmarks" / "demo.json",
+                        "--output", manifest)
+            result = self.invoke("collect-target", "--config", config, "--manifest", manifest,
+                                 "--output", output, "--role", "target_train",
+                                 "--low-risk-probability", ".99",
+                                 "--high-risk-probability", ".99")
+            self.assertEqual(result["attempted_rollouts"], 1)
+            self.assertEqual(result["selected_checkpoints"], 1)
+            trace_path = next((output / "traces").glob("*.json"))
+            trace = read_json(trace_path)
+            episode = trace["episode"]
+            self.assertEqual(episode["status"], "terminal")
+            self.assertEqual(episode["checkpoint_sampling"]["status"], "selected")
+            decisions = episode["checkpoint_sampling"]["selection_decisions"]
+            self.assertEqual(len([item for item in decisions if item["selected"]]), 1)
+            selected = episode["checkpoint_sampling"]["selected_step_index"]
+            for step in episode["steps"][selected + 1:]:
+                self.assertEqual(step["checkpoint_sampling"]["status"], "already_selected")
+            before = trace_path.read_bytes()
+            self.invoke("collect-target", "--config", config, "--manifest", manifest,
+                        "--output", output, "--role", "target_train",
+                        "--low-risk-probability", ".99",
+                        "--high-risk-probability", ".99")
+            self.assertEqual(before, trace_path.read_bytes())
+
     def test_complete_phase_one_and_resume(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
