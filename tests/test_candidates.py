@@ -3,7 +3,7 @@ import json
 import unittest
 from types import SimpleNamespace
 
-from cave_mem_v3.memory_generation.candidates import CandidateGenerationError, candidate_templates, create_candidate, finalize_candidate, generate_candidates, validate_candidate
+from cave_mem_v3.memory_generation.candidates import CandidateGenerationError, candidate_templates, create_candidate, eligible_source_steps, finalize_candidate, generate_candidates, validate_candidate
 from cave_mem_v3.common.contracts import StudySpec, digest
 from cave_mem_v3.environments.base import PreparationEnvironment
 from cave_mem_v3.agents.providers import ScriptedActor
@@ -30,6 +30,38 @@ def repair(trace):
 
 
 class CandidateTests(unittest.TestCase):
+    def test_unscored_and_synthetic_actions_cannot_be_repair_sources(self):
+        trace = source_trace()
+        trace["episode"]["environment_config"]["adapter"] = "terminal-bench-fs-boundary.v1"
+        trace["trace_hash"] = digest({k: v for k, v in trace.items() if k != "trace_hash"})
+        self.assertEqual(candidate_templates([trace]), [])
+        with self.assertRaisesRegex(ValueError, "scored source failure"):
+            generate_candidates(trace, object())
+
+        trace = source_trace()
+        step = copy.deepcopy(trace["episode"]["steps"][0])
+        step.update(index=len(trace["episode"]["steps"]), action={"type": "__unparsed_action__"},
+                    validation_error="expected shell action", result=None)
+        trace["episode"]["steps"].append(step)
+        trace["trace_hash"] = digest({k: v for k, v in trace.items() if k != "trace_hash"})
+        self.assertNotIn(step["index"], eligible_source_steps(trace))
+        self.assertEqual(len(candidate_templates([trace], max_steps_per_trace=10)), 1)
+        with self.assertRaisesRegex(ValueError, "executable original action"):
+            create_candidate(trace, step["index"], mechanism="bad", correction={"type": "prepare"},
+                             positive_conditions=[], exclusion_conditions=[], scope="bad", reviewer="test")
+
+        trace = source_trace()
+        trace["episode"]["steps"][0]["result"] = None
+        trace["trace_hash"] = digest({k: v for k, v in trace.items() if k != "trace_hash"})
+        self.assertEqual(eligible_source_steps(trace), [])
+
+    def test_unscored_success_cannot_be_teacher_reference(self):
+        reference = source_trace(safe=True)
+        reference["episode"]["environment_config"]["adapter"] = "terminal-bench-fs-boundary.v1"
+        reference["trace_hash"] = digest({k: v for k, v in reference.items() if k != "trace_hash"})
+        with self.assertRaisesRegex(ValueError, "historical successes"):
+            generate_candidates(source_trace(), object(), successful_traces=[reference])
+
     def test_template_requires_actual_repair_and_retains_real_action(self):
         trace = source_trace()
         templates = candidate_templates([trace, source_trace(safe=True)])

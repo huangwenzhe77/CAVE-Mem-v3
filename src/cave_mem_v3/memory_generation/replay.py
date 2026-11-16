@@ -214,6 +214,7 @@ def _collect_pair(plan: dict, checkpoint: dict, env_factory: Callable, actor_fac
         row["arms"][name] = arm
     original, corrected = row["arms"]["original"], row["arms"]["corrected"]
     row["valid"] = (original["status"] != "error" and corrected["status"] not in ("error", "invalid_action")
+                    and corrected.get("termination_reason") not in ("invalid_actor_output", "model_output_truncated")
                     and original.get("restore_fingerprint") is not None
                     and original.get("restore_fingerprint") == corrected.get("restore_fingerprint"))
     row["record_hash"] = digest(row)
@@ -254,7 +255,8 @@ def _check_records(rows: list[dict], plan: dict) -> tuple[list[float], bool]:
                 raise ValueError("source arm has an invalid outcome status")
             if arm["status"] != "terminal" and arm["success"]:
                 raise ValueError("nonterminal source arm cannot claim success")
-            if name == "corrected" and arm["status"] == "invalid_action":
+            if name == "corrected" and (arm["status"] == "invalid_action"
+                    or arm.get("termination_reason") in ("invalid_actor_output", "model_output_truncated")):
                 row_usable = False
             if arm.get("actor_config") != plan["actor_config"] or arm.get("environment_config") != plan["environment_config"]:
                 raise ValueError("source replay configuration differs from registered source")

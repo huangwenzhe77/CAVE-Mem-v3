@@ -2,18 +2,48 @@ import unittest
 
 from cave_mem_v3.common.contracts import PublicContext
 from cave_mem_v3.agents.providers import OpenAIConfig, OpenAICompatibleProvider, ProviderActor, ProviderError
-from cave_mem_v3.environments.base import PreparationEnvironment
+from cave_mem_v3.environments.base import EnvStep, PreparationEnvironment
 from cave_mem_v3.agents.runtime import run_episode
 from cave_mem_v3.common.contracts import StudySpec
 
 
-def response(text='{"type":"prepare"}', usage=None, *, model="Qwen/Qwen2.5-7B-Instruct", fingerprint=None):
-    return {"choices": [{"message": {"content": text}, "finish_reason": "stop"}],
+def response(text='{"type":"prepare"}', usage=None, *, model="Qwen/Qwen2.5-7B-Instruct", fingerprint=None,
+             finish_reason="stop"):
+    return {"choices": [{"message": {"content": text}, "finish_reason": finish_reason}],
             "model": model, "system_fingerprint": fingerprint,
             "usage": usage or {"prompt_tokens": 11, "completion_tokens": 3}}
 
 
 class ProviderTests(unittest.TestCase):
+    def test_length_response_is_charged_and_graded_without_executing_action(self):
+        class GradedEnvironment(PreparationEnvironment):
+            def __init__(self):
+                super().__init__()
+                self.verifier_report = None
+                self.finalize_calls = 0
+
+            def configuration(self):
+                return {**super().configuration(), "adapter": "terminal-bench-fs-boundary.v1"}
+
+            def finalize(self):
+                self.finalize_calls += 1
+                self.verifier_report = {"success": False}
+                return EnvStep(self.observe(), True, False)
+
+        for text in ('{"type":"prepare"}', '', None):
+            with self.subTest(text=text):
+                env = GradedEnvironment()
+                actor = ProviderActor(OpenAICompatibleProvider(OpenAIConfig(),
+                    transport=lambda _: response(text, finish_reason="length")))
+                trace = run_episode(env, actor, spec=StudySpec(), seed=0)
+                self.assertEqual(trace["status"], "terminal")
+                self.assertEqual(trace["termination_reason"], "model_output_truncated")
+                self.assertEqual(trace["steps"][0]["actor_response"]["finish_reason"], "length")
+                self.assertEqual(trace["costs"]["model_calls"], 1)
+                self.assertEqual(trace["costs"]["tool_calls"], 0)
+                self.assertEqual(env.finalize_calls, 1)
+                self.assertFalse(trace["success"])
+
     def test_empty_configuration_never_downloads_or_connects(self):
         provider = OpenAICompatibleProvider(OpenAIConfig())
         self.assertEqual(provider.configuration()["model"], "Qwen/Qwen2.5-7B-Instruct")

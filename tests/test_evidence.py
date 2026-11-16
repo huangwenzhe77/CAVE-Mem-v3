@@ -194,6 +194,17 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(evidence["v"], "?")
         self.assertEqual(evidence["reason"], "replay_contains_error_or_invalid_repair")
 
+    def test_scored_invalid_correction_is_not_a_valid_repair(self):
+        def runner(*args, **kwargs):
+            arm = run_episode(*args, **kwargs)
+            if kwargs.get("first_action") == {"type": "prepare"}:
+                arm["termination_reason"] = "model_output_truncated"
+            return arm
+        evidence = self.evidence(episode_runner=runner)
+        self.assertTrue(all(not row["valid"] for row in evidence["pairs"]))
+        self.assertEqual(evidence["v"], "?")
+        self.assertEqual(evidence["reason"], "replay_contains_error_or_invalid_repair")
+
     def test_changed_actor_and_uncertified_restoration_fail_closed(self):
         evidence = verify_candidate(self.candidate, self.trace,
             lambda: PreparationEnvironment(task_id="source-a"), lambda: ScriptedActor(error_rate=0.1),

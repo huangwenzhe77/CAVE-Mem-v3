@@ -503,7 +503,8 @@ def _summarize_target_single(args):
 
 
 def _candidates(args):
-    from cave_mem_v3.memory_generation.candidates import candidate_templates, generate_candidates
+    from cave_mem_v3.memory_generation.candidates import candidate_templates, eligible_source_steps, generate_candidates
+    from cave_mem_v3.memory_generation.collection import scored_source_outcome
     _new_file(args.output)
     traces = _collection_traces(args.collection)
     if not args.generate:
@@ -513,10 +514,11 @@ def _candidates(args):
         if not args.config:
             raise ValueError("--generate requires --config with a configured hypothesis model")
         provider = _teacher(load_config(args.config))
-        failures = [t for t in traces if t["episode"].get("success") is False
-                    and t["episode"].get("status") in ("terminal", "budget_exhausted")]
+        failures = [t for t in traces if eligible_source_steps(t)]
         excluded = [{"trace_id": t["trace_id"], "task_id": t["task_id"],
-                     "status": t["episode"].get("status"), "reason": "not_a_scored_task_failure"}
+                     "status": t["episode"].get("status"),
+                     "reason": ("no_executable_source_step" if scored_source_outcome(t["episode"]) is False
+                                else "not_a_scored_task_failure")}
                     for t in traces if t["episode"].get("success") is False and t not in failures]
         plan = {"source_run_hash": traces[0]["run_hash"], "source_trace_hashes": [t["trace_hash"] for t in traces],
                 "provider_config": provider.configuration(), "max_candidates": args.max_candidates,
@@ -545,7 +547,8 @@ def _candidates(args):
                 with pending.open("x", encoding="utf-8") as stream:
                     json.dump({"plan_hash": plan["plan_hash"], "trace_hash": trace["trace_hash"],
                                "status": "request_started"}, stream)
-                successes = [t for t in traces if t["task_id"] == trace["task_id"] and t["episode"].get("success") is True]
+                successes = [t for t in traces if t["task_id"] == trace["task_id"]
+                             and scored_source_outcome(t["episode"]) is True]
                 try:
                     result = generate_candidates(trace, provider, successful_traces=successes,
                                                  max_candidates=args.max_candidates, seed=trace["seed"])

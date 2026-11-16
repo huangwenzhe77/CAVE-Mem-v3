@@ -121,6 +121,12 @@ def run_episode(env, actor, *, spec: StudySpec, seed: int, checkpoint=None,
                 step["action_origin"] = "actor"
                 pending_response = None
             step["action"] = action
+            if step["actor_response"] is not None and step["actor_response"].get("finish_reason") == "length":
+                step["validation_error"] = "model response reached the output token limit"
+                record.update(status="invalid_action", success=False,
+                              termination_reason="model_output_truncated",
+                              actor_behavior={"kind": "truncated_response", "step_index": index})
+                break
             if (checkpoint_sampler is not None and sampling.get("selected") is True):
                 sampled_action = copy.deepcopy(action)
                 if prepare_selected is not None:
@@ -140,7 +146,9 @@ def run_episode(env, actor, *, spec: StudySpec, seed: int, checkpoint=None,
             valid, reason = env.validate_action(action)
             if not valid:
                 step["validation_error"] = reason
-                record.update(status="invalid_action", success=False)
+                record.update(status="invalid_action", success=False,
+                              termination_reason="invalid_actor_output",
+                              actor_behavior={"kind": "invalid_action", "step_index": index})
                 prior_steps.append({"action": copy.deepcopy(action), "valid": False,
                                     "validation_error": reason})
                 break
@@ -154,7 +162,9 @@ def run_episode(env, actor, *, spec: StudySpec, seed: int, checkpoint=None,
             else:
                 costs["tool_cost"] += finite(result.tool_cost, "tool_cost", minimum=0)
             if not result.valid:
-                record.update(status="invalid_action", success=False)
+                record.update(status="invalid_action", success=False,
+                              termination_reason="invalid_actor_output",
+                              actor_behavior={"kind": "invalid_action", "step_index": index})
                 break
             if result.terminal:
                 if type(result.success) is not bool:
@@ -166,14 +176,15 @@ def run_episode(env, actor, *, spec: StudySpec, seed: int, checkpoint=None,
             context = result.context
         else:
             record.update(status="budget_exhausted", success=False)
-        if record["status"] == "budget_exhausted" and callable(getattr(env, "finalize", None)):
+        if record["status"] in ("budget_exhausted", "invalid_action") and callable(getattr(env, "finalize", None)):
             # Benchmarks with an external terminal grader evaluate the files at
             # the exact budget boundary without granting another actor action.
             final = env.finalize()
             if not final.terminal or type(final.success) is not bool:
                 raise ValueError("finalization must provide an explicit terminal outcome")
             record.update(status="terminal", success=final.success,
-                          termination_reason="budget_exhausted", finalization=plain(final))
+                          termination_reason=record.get("termination_reason", "budget_exhausted"),
+                          finalization=plain(final))
         if actor.configuration() != record["actor_config"] or env.configuration() != record["environment_config"]:
             raise ValueError("frozen actor/environment configuration changed")
     except Exception as exc:
@@ -185,7 +196,9 @@ def run_episode(env, actor, *, spec: StudySpec, seed: int, checkpoint=None,
             add_usage(costs, attempt.get("usage", {}))
             if attempt.get("identity_error"):
                 record["response_identity"]["fingerprint_status"] = "mismatch"
-        if record["steps"] and record["steps"][-1].get("action") is not None and record["steps"][-1].get("result") is None:
+        if (record["steps"] and record["steps"][-1].get("action") is not None
+                and record["steps"][-1].get("result") is None
+                and "validation_error" not in record["steps"][-1]):
             costs["tool_cost"] = None
     finally:
         if checkpoint_sampler is not None:

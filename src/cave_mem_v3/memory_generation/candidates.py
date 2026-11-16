@@ -10,6 +10,7 @@ import json
 from typing import Any, Iterable
 
 from cave_mem_v3.common.contracts import canonical, digest, plain
+from cave_mem_v3.memory_generation.collection import scored_source_outcome
 from cave_mem_v3.memory_generation.predicates import validate_predicate
 
 
@@ -39,18 +40,37 @@ def checked_trace(trace: dict) -> dict:
 
 def _failed_step(trace: dict, step_index: int) -> dict:
     episode = checked_trace(trace)
-    if episode.get("success") is not False or episode.get("status") not in ("terminal", "budget_exhausted", "invalid_action"):
-        raise ValueError("repair hypotheses require a completed unsuccessful episode, not an infrastructure error")
+    if scored_source_outcome(episode) is not False:
+        raise ValueError("repair hypotheses require a scored unsuccessful source episode")
     if type(step_index) is not int or not 0 <= step_index < len(episode["steps"]):
         raise ValueError("candidate step is outside its source trajectory")
     step = episode["steps"][step_index]
     if step.get("index") != step_index or not isinstance(step.get("checkpoint"), dict):
         raise ValueError("source step has no aligned restorable checkpoint")
-    if not isinstance(step.get("action"), dict) or not step["action"]:
+    if (not isinstance(step.get("action"), dict) or not step["action"]
+            or step["action"].get("type") == "__unparsed_action__"
+            or step.get("validation_error") is not None
+            or not isinstance(step.get("result"), dict) or step["result"].get("valid") is not True
+            or (isinstance(step.get("actor_response"), dict)
+                and step["actor_response"].get("finish_reason") == "length")):
         raise ValueError("source step has no executable original action")
     if step.get("context", {}).get("task_id") != trace["task_id"]:
         raise ValueError("source step task identity mismatch")
     return step
+
+
+def eligible_source_steps(trace: dict) -> list[int]:
+    if scored_source_outcome(trace.get("episode") or {}) is not False:
+        return []
+    episode = checked_trace(trace)
+    eligible = []
+    for index in range(len(episode["steps"])):
+        try:
+            _failed_step(trace, index)
+        except ValueError:
+            continue
+        eligible.append(index)
+    return eligible
 
 
 def _binding(trace: dict, step_index: int) -> dict:
@@ -81,7 +101,7 @@ def candidate_templates(traces: Iterable[dict], *, max_steps_per_trace: int = 3)
     drafts = []
     for trace in traces:
         episode = checked_trace(trace)
-        if episode.get("success") is not False or episode.get("status") == "error":
+        if scored_source_outcome(episode) is not False:
             continue
         for index in range(min(len(episode["steps"]), max_steps_per_trace)):
             try:
@@ -160,9 +180,12 @@ def public_source_episode(trace: dict) -> dict:
                       "observation": context.get("observation", ""),
                       "action": copy.deepcopy(step.get("action")),
                       "next_observation": next_context.get("observation", ""),
-                      "action_valid": result.get("valid")})
+                      "action_valid": result.get("valid"),
+                      "validation_error": step.get("validation_error"),
+                      "finish_reason": (step.get("actor_response") or {}).get("finish_reason")})
     return {"task_id": trace["task_id"], "success": episode.get("success"),
-            "status": episode.get("status"), "steps": steps}
+            "status": episode.get("status"), "termination_reason": episode.get("termination_reason"),
+            "actor_behavior": episode.get("actor_behavior"), "steps": steps}
 
 
 def generate_candidates(trace: dict, provider: Any, *, successful_traces: Iterable[dict] = (),
@@ -174,15 +197,15 @@ def generate_candidates(trace: dict, provider: Any, *, successful_traces: Iterab
     No retry or best-of-N filtering is hidden in this function.
     """
     episode = checked_trace(trace)
-    if episode.get("success") is not False or episode.get("status") == "error":
-        raise ValueError("candidate generation needs a failed source episode")
+    if not eligible_source_steps(trace):
+        raise ValueError("candidate generation needs a scored source failure with an executable original action")
     if type(max_candidates) is not int or max_candidates < 1:
         raise ValueError("max_candidates must be positive")
     successful_traces = list(successful_traces)
     successes = []
     for reference in successful_traces:
         reference_episode = checked_trace(reference)
-        if reference["task_id"] != trace["task_id"] or reference_episode.get("success") is not True:
+        if reference["task_id"] != trace["task_id"] or scored_source_outcome(reference_episode) is not True:
             raise ValueError("successful references must be historical successes of the same task")
         successes.append(public_source_episode(reference))
     schema = {"candidates": [{"step_index": 0, "mechanism": "falsifiable failure hypothesis",
@@ -193,11 +216,14 @@ def generate_candidates(trace: dict, provider: Any, *, successful_traces: Iterab
     messages = [{"role": "system", "content": (
         "Propose source-side repair hypotheses from the supplied historical observations. "
         "Do not claim verified causality or target transfer. Use only observed facts; do not invent hidden state. "
-        "Choose a recorded step and one executable action replacing that step. Return JSON only, with no markdown. "
+        "Choose a step only from eligible_step_indices and one executable action replacing that step. "
+        "Return JSON only, with no markdown. "
         "Conditions must be executable: a public fact field with exactly one equals/not_equals/in/exists operator, "
         "or source observation/instruction/history with a regex. Do not use private scorer/outcome fields. "
         f"Return at most {max_candidates} distinct candidates using this schema: {canonical(schema)}")},
-        {"role": "user", "content": canonical({"failed": public_source_episode(trace), "successes": successes})}]
+        {"role": "user", "content": canonical({"failed": public_source_episode(trace),
+                                                 "eligible_step_indices": eligible_source_steps(trace),
+                                                 "successes": successes})}]
     before = copy.deepcopy(provider.configuration())
     generation = {"status": "started", "error_type": None, "failure_stage": None,
                   "provider_config": before, "model": None, "prompt_hash": digest(messages),

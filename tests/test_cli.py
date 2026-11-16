@@ -165,6 +165,27 @@ class CommandTests(unittest.TestCase):
             self.assertEqual(result["excluded_source_traces"], 1)
             self.assertEqual(read_json(output)["excluded_source_traces"][0]["trace_id"], "bad-action")
 
+    def test_automatic_generation_excludes_scored_failure_without_executable_step(self):
+        from test_candidates import source_trace
+        from cave_mem_v3.common.contracts import digest
+        from cave_mem_v3.agents.providers import OpenAIConfig, OpenAICompatibleProvider
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "candidates.json"
+            trace = source_trace()
+            episode = trace["episode"]
+            episode["steps"][0].update(action={"type": "__unparsed_action__"},
+                                       validation_error="invalid JSON", result=None)
+            trace["trace_hash"] = digest({k: v for k, v in trace.items() if k != "trace_hash"})
+            provider = OpenAICompatibleProvider(OpenAIConfig(),
+                transport=lambda _: self.fail("no executable source step must not reach teacher"))
+            with patch("cave_mem_v3.cli._collection_traces", return_value=[trace]), \
+                 patch("cave_mem_v3.cli._teacher", return_value=provider):
+                result = self.invoke("candidates", "--collection", directory, "--output", output,
+                                     "--generate", "--config", ROOT / "configs" / "phase1" / "demo.toml")
+            self.assertEqual(result["candidate_count"], 0)
+            self.assertEqual(read_json(output)["excluded_source_traces"][0]["reason"],
+                             "no_executable_source_step")
+
 
 if __name__ == "__main__":
     unittest.main()

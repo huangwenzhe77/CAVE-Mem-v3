@@ -91,6 +91,20 @@ def _episode_check(episode: dict, actor_config: dict, environment_config: dict, 
         raise ValueError("episode checksum mismatch")
 
 
+def scored_source_outcome(episode: dict) -> bool | None:
+    """Return a task outcome only when this adapter actually scored it."""
+    status, success = episode.get("status"), episode.get("success")
+    if type(success) is not bool:
+        return None
+    adapter = (episode.get("environment_config") or {}).get("adapter")
+    if adapter == "terminal-bench-fs-boundary.v1":
+        verifier = episode.get("private_verifier")
+        return success if status == "terminal" and isinstance(verifier, dict) and verifier.get("success") is success else None
+    if adapter == "preparation-fixture.v3" and status == "terminal":
+        return success
+    return None
+
+
 def _response_identity(episode: dict) -> dict:
     """Legacy injected fixture episodes without identity remain unknown."""
     identity = episode.get("response_identity")
@@ -142,9 +156,14 @@ def _record_identity_error(episode: dict, reference: dict, conflicts: list[str])
 
 
 def _summary(run, traces, config, task_ids, planned_runs, nominal_runs):
-    successes = sum(trace["episode"]["success"] is True for trace in traces)
-    failures = sum(trace["episode"]["success"] is False and trace["episode"]["status"] != "error" for trace in traces)
+    successes = sum(scored_source_outcome(trace["episode"]) is True for trace in traces)
+    failures = sum(scored_source_outcome(trace["episode"]) is False for trace in traces)
     errors = sum(trace["episode"]["status"] == "error" for trace in traces)
+    unscored = sum(trace["episode"]["status"] != "error"
+                   and scored_source_outcome(trace["episode"]) is None for trace in traces)
+    unscored_invalid = sum(trace["episode"]["status"] == "invalid_action"
+                           and scored_source_outcome(trace["episode"]) is None for trace in traces)
+    truncated = sum(trace["episode"].get("termination_reason") == "model_output_truncated" for trace in traces)
     identity_errors = sum((trace["episode"].get("error") or {}).get("scope") == "cross_episode_identity" for trace in traces)
     if config.mode == "failure_target" and failures >= config.failure_target:
         reason = "failure_target_reached"
@@ -161,14 +180,16 @@ def _summary(run, traces, config, task_ids, planned_runs, nominal_runs):
     if len(traces) >= config.max_runs:
         limits_reached.append("max_runs")
     attempts = Counter(trace["task_id"] for trace in traces)
-    measured = {trace["task_id"] for trace in traces if trace["episode"]["status"] != "error"}
-    failure_tasks = {trace["task_id"] for trace in traces if trace["episode"]["success"] is False and trace["episode"]["status"] != "error"}
+    measured = {trace["task_id"] for trace in traces if scored_source_outcome(trace["episode"]) is not None}
+    failure_tasks = {trace["task_id"] for trace in traces if scored_source_outcome(trace["episode"]) is False}
     result = {"schema_version": "history-summary.v3", "run_hash": run["run_hash"],
               "manifest_hash": run["manifest_hash"], "mode": config.mode,
               "stop_reason": reason, "limits_reached": limits_reached,
               "nominal_runs": nominal_runs, "planned_runs": planned_runs,
               "attempted_runs": len(traces), "completed_runs": successes + failures,
               "successful_runs": successes, "failed_runs": failures, "infrastructure_errors": errors,
+              "unscored_outcomes": unscored,
+              "unscored_invalid_actions": unscored_invalid, "truncated_actor_responses": truncated,
               "response_identity_errors": identity_errors,
               "failure_rate_observed": failures / (successes + failures) if successes + failures else None,
               "history_task_count": len(task_ids), "tasks_attempted": len(attempts),
@@ -254,11 +275,11 @@ def collect_history(manifest: dict, config: CollectionConfig, spec: StudySpec,
         if _identity_conflicts(trace["episode"], response_reference):
             raise ValueError("stored completed episodes have inconsistent response identity; existing traces were not modified")
         _remember_identity(trace["episode"], response_reference)
-        if config.mode == "failure_target" and sum(t["episode"]["success"] is False for t in traces) >= config.failure_target:
+        if config.mode == "failure_target" and sum(scored_source_outcome(t["episode"]) is False for t in traces) >= config.failure_target:
             raise ValueError("trace sequence continues past its registered stopping rule")
         traces.append(trace)
     for index in range(len(traces), planned_runs):
-        if config.mode == "failure_target" and sum(t["episode"]["success"] is False for t in traces) >= config.failure_target:
+        if config.mode == "failure_target" and sum(scored_source_outcome(t["episode"]) is False for t in traces) >= config.failure_target:
             break
         task, replicate, trace_id, seed = planned[index]
         started_file = root / "attempts" / f"{index:06d}.json"

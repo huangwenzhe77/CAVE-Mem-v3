@@ -237,7 +237,9 @@ class OpenAICompatibleProvider:
                 "weight_revision_certified": False}
             choice = raw["choices"][0]
             text = choice["message"].get("content")
-            if not isinstance(text, str) or not text.strip():
+            if text is None and choice.get("finish_reason") == "length":
+                text = ""
+            if not isinstance(text, str) or (not text.strip() and choice.get("finish_reason") != "length"):
                 raise ValueError("provider returned no textual action")
             attempt.update(status="completed", response_hash=digest(raw), usage=usage,
                            finish_reason=choice.get("finish_reason"))

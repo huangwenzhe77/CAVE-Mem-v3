@@ -28,7 +28,7 @@ class DummyEnv:
         self.task_id = task["task_id"]
 
     def configuration(self):
-        return {"task_id": self.task_id, "protocol": "test"}
+        return {"adapter": "preparation-fixture.v3", "task_id": self.task_id, "protocol": "test"}
 
     def capabilities(self):
         return {"restore_certified": True}
@@ -138,6 +138,27 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(set(t for t, _ in calls), {"a", "b"})
         self.assertNotEqual(calls[0][0], calls[1][0])
         self.assertEqual(len(list((self.output / "traces").glob("*.json"))), 6)
+
+    def test_unscored_invalid_action_does_not_reach_failure_target(self):
+        calls = []
+        base = runner_for((False,), calls)
+        def runner(env, actor, **kwargs):
+            episode = base(env, actor, **kwargs)
+            if len(calls) == 1:
+                episode["status"] = "invalid_action"
+            return episode
+        report = collect_history(self.manifest,
+            CollectionConfig(mode="failure_target", runs_per_task=1, failure_target=1, max_runs=2),
+            self.spec, DummyEnv, DummyActor, self.output, episode_runner=runner)
+        self.assertEqual(report["attempted_runs"], 2)
+        self.assertEqual(report["failed_runs"], 1)
+        self.assertEqual(report["unscored_invalid_actions"], 1)
+        self.assertEqual(report["unscored_outcomes"], 1)
+        self.assertEqual(report["stop_reason"], "failure_target_reached")
+        self.assertEqual(collect_history(self.manifest,
+            CollectionConfig(mode="failure_target", runs_per_task=1, failure_target=1, max_runs=2),
+            self.spec, DummyEnv, DummyActor, self.output, episode_runner=runner), report)
+        self.assertEqual(len(calls), 2)
 
     def test_failure_target_ignores_infrastructure_errors_and_honors_cap(self):
         report = self.collect(CollectionConfig(mode="failure_target", runs_per_task=3, failure_target=2, max_runs=5), (None, False, True))

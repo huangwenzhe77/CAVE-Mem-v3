@@ -1,5 +1,21 @@
 # 变更记录
 
+## 2026-11-16 — R-00 Terminal 来源运行前置修复
+
+| 文件 | 本卡变更 |
+| --- | --- |
+| `docs/phase1.md` | 明确已评分失败、未评分运行和截断输出的分母口径 |
+| `src/cave_mem_v3/agents/providers.py` | `length` 且空内容仍保留已完成响应及用量 |
+| `src/cave_mem_v3/agents/runtime.py` | 无效/截断动作停止执行，Terminal 评分当前文件，保留行为原因和费用 |
+| `src/cave_mem_v3/cli.py` | 教师来源、同题成功参照与排除原因统一筛选 |
+| `src/cave_mem_v3/memory_generation/candidates.py` | 候选仅来自已评分失败和有效执行步骤，教师只选合格索引 |
+| `src/cave_mem_v3/memory_generation/collection.py` | 已评分结局统一用于汇总/停止；未评分和截断单列 |
+| `src/cave_mem_v3/memory_generation/replay.py` | 无效/截断修正臂不得作为有效来源修正 |
+| `tests/test_candidates.py`、`test_cli.py`、`test_evidence.py`、`test_providers.py`、`test_tasks_collection.py` | 覆盖来源资格、排除、回放、空截断响应、旧未评分轨迹重读 |
+| `docs/task_cards.md`、`CHANGELOG.md` | R-00 范围与审查/验证记录 |
+
+基于 `e02b07f` 的 `codex/terminal-batch-preflight` 分支；一名实现、两名独立只读审核均通过，Python 3.13 聚焦 81 项通过，`git diff --check` 通过。Windows 全量 359 项中 2 项未通过：一项为 8.3 临时路径别名比较，一项为离线学习 fixture 拟合不可用；H20 Linux 全量测试仍待主运行任务核验。旧真实轨迹和运行目录未改写，本卡 0 次真实模型/benchmark 请求。
+
 ## 2026-11-16 — I-01 四部分核心软件整体验收
 
 一名实现 agent 独占源码/测试修改，两名独立只读 agent 分别审核研究边界和工程正确性；主 agent 运行最终集成检查并维护文档。P3/P4/I-01 共 10 张代码卡按前置依赖逐卡完成，没有并行实施下一张卡。
