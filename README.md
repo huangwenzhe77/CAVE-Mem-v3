@@ -69,6 +69,8 @@ python examples/four_phase_learning_demo.py --output runs/four-phase-learning-de
 
 真实教师输出若截断或解析失败，可在提高冻结的教师输出预算后使用新输出路径执行 `cave3 candidates --generate --collection <history> --config <new-teacher.toml> --reuse-successes-from <old-candidates.json> --output <new-candidates.json>`。它校验并复用同一历史批次已成功的每条唯一候选，只对失败项发起一次新请求；旧费用和失败记录保留，不产生同一历史轨迹的多个有效候选。
 
+真实 Terminal-Bench 的官方测试可能在容器内下载依赖，超过任务清单中的 600 秒执行保护。Enroot 运行时可设置 `CAVE_VERIFIER_TIMEOUT_FLOOR_SECONDS=1800`，仅延长宿主机等待私有测试结束的时间；任务、测试脚本、奖励判定、actor 配置及冻结任务协议保持原样，实际等待上限写入私有验证结果。重跑仍需使用新的输出目录以保留原始超时证据。
+
 `four_phase_learning_demo.py` 进一步生成实际拟合的收益/风险模型、校准、监督 gate、配对与单臂 DR bandit，冻结候选后运行新完整验证，最后比较选中学习策略与真正不检索记忆的 actor 基线。输出包含原始记录、选择锁、最终计划/报告和 `summary.json`。脚本模型、两个公开玩具条件及宽松演示阈值仅用于验收；未实现真实模型效果证明或正式研究参数选择。单臂 bandit 仍借助兼容的配对初始化与校准，不代表纯单臂数据可从零完成整套训练。
 
 第二部分的配对示例额外生成 `prepared/` 和 `paired/`，单臂示例生成 `single/`。已有 `prepare-target` 产物可使用同一冻结配置运行：

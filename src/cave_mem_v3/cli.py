@@ -325,11 +325,11 @@ def _env_factory(raw, manifest):
             raise ValueError("terminal task assets differ from the prepared manifest")
         backend_name = raw["environment"].get("backend", "docker")
         if backend_name == "enroot":
-            from cave_mem_v3.environments.enroot import EnrootBackend
+            from cave_mem_v3.environments.enroot_runtime import EnrootRuntimeBackend
             snapshots = raw["environment"].get("snapshot_dir")
             if not snapshots:
                 raise ValueError("configure environment.snapshot_dir for Enroot")
-            return TerminalEnvironment(terminal, backend=EnrootBackend(snapshots))
+            return TerminalEnvironment(terminal, backend=EnrootRuntimeBackend(snapshots))
         if backend_name != "docker":
             raise ValueError("environment.backend must be docker or enroot")
         return TerminalEnvironment(terminal)
