@@ -98,8 +98,12 @@ def _prompt(bank, memory, item, silent):
         "the historical failure mechanism. You see only public before/after observations "
         "from the Silent arm. Do not infer from terminal success, reward, or a Remind arm. "
         "Return exactly one JSON object with keys e, confidence, reason. "
-        "e must be 0, 1, or '?'; use '?' when the observed effect is insufficient "
-        "to confirm or rule out the mechanism. Confidence is low, medium, high, or '?'. "
+        "e must be 0, 1, or '?'. Use 0 when the original action and its immediate observed "
+        "effect clearly do not perform the operation needed for the historical mechanism; "
+        "for example, only creating an empty file or installing dependencies cannot itself "
+        "instantiate a regex-match failure. Use '?' only when the action could plausibly "
+        "trigger the mechanism but the relevant effect is missing or ambiguous. "
+        "Confidence is low, medium, high, or '?'. "
         "The reason must cite concrete supplied action/observation evidence, not imagined state.")},
         {"role": "user", "content": canonical(evidence)}]
     return messages
