@@ -45,7 +45,9 @@ class CandidateTests(unittest.TestCase):
         trace["episode"]["steps"].append(step)
         trace["trace_hash"] = digest({k: v for k, v in trace.items() if k != "trace_hash"})
         self.assertNotIn(step["index"], eligible_source_steps(trace))
-        self.assertEqual(len(candidate_templates([trace], max_steps_per_trace=10)), 1)
+        self.assertEqual(len(candidate_templates([trace])), 1)
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            candidate_templates([trace], max_steps_per_trace=10)
         with self.assertRaisesRegex(ValueError, "executable original action"):
             create_candidate(trace, step["index"], mechanism="bad", correction={"type": "prepare"},
                              positive_conditions=[], exclusion_conditions=[], scope="bad", reviewer="test")
@@ -151,7 +153,7 @@ class CandidateTests(unittest.TestCase):
         self.assertTrue(error.generation["response_hash"])
         self.assertEqual(error.candidates, [])
 
-    def test_partial_candidates_and_configuration_errors_preserve_metering(self):
+    def test_multiple_candidates_are_rejected_and_configuration_errors_preserve_metering(self):
         good = {"step_index": 0, "mechanism": "missing preparation", "correction": {"type": "prepare"},
                 "positive_conditions": [{"field": "prepared", "equals": False}], "scope": "source only"}
         class Provider:
@@ -166,14 +168,31 @@ class CandidateTests(unittest.TestCase):
                     model="test-model", usage={"model_calls": 1, "output_tokens": 29}, attempt={"status": "completed"})
         with self.assertRaises(CandidateGenerationError) as caught:
             generate_candidates(source_trace(), Provider())
-        self.assertEqual(len(caught.exception.candidates), 1)
-        self.assertEqual(caught.exception.generation["failure_stage"], "candidate_validation")
+        self.assertEqual(caught.exception.candidates, [])
+        self.assertEqual(caught.exception.generation["failure_stage"], "parse")
+        self.assertEqual(caught.exception.generation["usage"]["output_tokens"], 29)
         provider = Provider()
         provider.drift = True
         with self.assertRaises(CandidateGenerationError) as caught:
             generate_candidates(source_trace(), provider)
         self.assertEqual(caught.exception.generation["usage"]["output_tokens"], 29)
         self.assertEqual(caught.exception.generation["failure_stage"], "configuration")
+
+    def test_zero_candidates_are_rejected_without_retry(self):
+        class Provider:
+            calls = 0
+            def configuration(self):
+                return {"provider": "test"}
+            def generate(self, messages, **kwargs):
+                self.calls += 1
+                return SimpleNamespace(text='{"candidates": []}', model="test-model",
+                                       usage={"model_calls": 1}, attempt={"status": "completed"})
+        provider = Provider()
+        with self.assertRaises(CandidateGenerationError) as caught:
+            generate_candidates(source_trace(), provider)
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(caught.exception.generation["failure_stage"], "parse")
+        self.assertEqual(caught.exception.candidates, [])
 
     def test_provider_failure_retains_attempt_and_unknown_cost(self):
         class ProviderFailure(RuntimeError):

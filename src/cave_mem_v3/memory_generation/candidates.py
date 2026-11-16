@@ -94,20 +94,17 @@ def source_failure_signature(trace: dict, step_index: int) -> str:
                       "validation_error": step.get("validation_error")})
 
 
-def candidate_templates(traces: Iterable[dict], *, max_steps_per_trace: int = 3) -> list[dict]:
+def candidate_templates(traces: Iterable[dict], *, max_steps_per_trace: int = 1) -> list[dict]:
     """Return editable hypotheses; no guessed cause or invented correction."""
-    if type(max_steps_per_trace) is not int or max_steps_per_trace < 1:
-        raise ValueError("max_steps_per_trace must be positive")
+    if type(max_steps_per_trace) is not int or max_steps_per_trace != 1:
+        raise ValueError("each eligible source trace must have exactly one candidate template")
     drafts = []
     for trace in traces:
         episode = checked_trace(trace)
         if scored_source_outcome(episode) is not False:
             continue
-        for index in range(min(len(episode["steps"]), max_steps_per_trace)):
-            try:
-                binding = _binding(trace, index)
-            except ValueError:
-                continue
+        for index in eligible_source_steps(trace)[:1]:
+            binding = _binding(trace, index)
             drafts.append({"schema_version": "repair-candidate.v3", "status": "draft", **binding,
                            "mechanism": "", "correction": None, "positive_conditions": [],
                            "exclusion_conditions": [], "scope": "", "failure_signature": source_failure_signature(trace, index),
@@ -189,7 +186,7 @@ def public_source_episode(trace: dict) -> dict:
 
 
 def generate_candidates(trace: dict, provider: Any, *, successful_traces: Iterable[dict] = (),
-                        max_candidates: int = 3, seed: int = 42) -> dict:
+                        max_candidates: int = 1, seed: int = 42) -> dict:
     """Propose source hypotheses with one metered structured model request.
 
     Reference successes must be historical runs of the same task. Generated
@@ -199,8 +196,8 @@ def generate_candidates(trace: dict, provider: Any, *, successful_traces: Iterab
     episode = checked_trace(trace)
     if not eligible_source_steps(trace):
         raise ValueError("candidate generation needs a scored source failure with an executable original action")
-    if type(max_candidates) is not int or max_candidates < 1:
-        raise ValueError("max_candidates must be positive")
+    if type(max_candidates) is not int or max_candidates != 1:
+        raise ValueError("each eligible source trace must request exactly one candidate")
     successful_traces = list(successful_traces)
     successes = []
     for reference in successful_traces:
@@ -220,7 +217,7 @@ def generate_candidates(trace: dict, provider: Any, *, successful_traces: Iterab
         "Return JSON only, with no markdown. "
         "Conditions must be executable: a public fact field with exactly one equals/not_equals/in/exists operator, "
         "or source observation/instruction/history with a regex. Do not use private scorer/outcome fields. "
-        f"Return at most {max_candidates} distinct candidates using this schema: {canonical(schema)}")},
+        f"Return exactly one candidate using this schema: {canonical(schema)}")},
         {"role": "user", "content": canonical({"failed": public_source_episode(trace),
                                                  "eligible_step_indices": eligible_source_steps(trace),
                                                  "successes": successes})}]
@@ -243,8 +240,8 @@ def generate_candidates(trace: dict, provider: Any, *, successful_traces: Iterab
         failure_stage = "parse"
         decoded = json.loads(response.text)
         proposals = decoded.get("candidates") if isinstance(decoded, dict) else None
-        if not isinstance(proposals, list) or not 0 <= len(proposals) <= max_candidates:
-            raise ValueError("hypothesis model returned an invalid number of candidates")
+        if not isinstance(proposals, list) or len(proposals) != 1:
+            raise ValueError("hypothesis model must return exactly one candidate")
         failure_stage = "candidate_validation"
         for proposal in proposals:
             if not isinstance(proposal, dict):

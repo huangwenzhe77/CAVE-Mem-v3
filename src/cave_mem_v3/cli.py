@@ -505,6 +505,8 @@ def _summarize_target_single(args):
 def _candidates(args):
     from cave_mem_v3.memory_generation.candidates import candidate_templates, eligible_source_steps, generate_candidates
     from cave_mem_v3.memory_generation.collection import scored_source_outcome
+    if args.max_candidates != 1:
+        raise ValueError("each eligible source trace must have exactly one candidate")
     _new_file(args.output)
     traces = _collection_traces(args.collection)
     if not args.generate:
@@ -820,7 +822,8 @@ def main(argv=None):
     p = sub.add_parser("candidates", help="write editable hypotheses or propose them with an LLM")
     p.add_argument("--collection", required=True)
     p.add_argument("--output", required=True)
-    p.add_argument("--max-candidates", type=int, default=3)
+    p.add_argument("--max-candidates", type=int, default=1,
+                   help="one candidate per eligible failed history trace (fixed protocol)")
     p.add_argument("--generate", action="store_true")
     p.add_argument("--config")
     p = sub.add_parser("verify", help="independent matched source replay")
