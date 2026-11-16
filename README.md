@@ -90,10 +90,13 @@ cave3 summarize-target-single --run <single-directory>
 ```bash
 cave3 collect-auto-target --config <frozen.toml> --manifest <manifest.json> --bank <bank.json> --output <new-auto-directory> --role target_train --encoder-path <local-encoder-directory> --encoder-revision <pinned-revision> --assignment-probability 0.5
 cave3 summarize-target-auto --run <auto-directory>
-cave3 build-policy-dataset --auto <auto-directory> --output <new-dataset.json>
+cave3 judge-paired-exposure --run <auto-directory> --config <frozen.toml> --output <new-exposure-directory>
+cave3 build-policy-dataset --auto <auto-directory> --exposure <auto-directory> <exposure-directory> --output <new-dataset.json>
 ```
 
-`--assignment-probability` 是预先固定的 `P(Remind)`，必须显式填写且严格介于 0 和 1；检查点纳入概率另存。`--exposure-rules` 可指定已有暴露规则，缺失时保留 `e=?`。单臂仅保存观察到的结局和效用及分配概率，不生成配对 D/H/rescue。无记忆或预算不足的检查点不随机化，保留费用和排除原因，未知终局不算失败。完成后的续读和只读汇总均不发出模型请求；未完成会话无法自动恢复或重试。现有真实 Terminal 入口仍受文件系统协议及任务范围审核约束，新增真实后端需独立适配。
+`--assignment-probability` 是预先固定的 `P(Remind)`，必须显式填写且严格介于 0 和 1；检查点纳入概率另存。配对执行后，独立教师只看历史机制、目标检查点和 Silent 原动作的公开执行结果，给出事后 `e=0/1/?` 与理由；数据集把它保存在 `e_observed` 和版本化 `x_final`，不把 Remind 结局或任务评分交给教师。单臂不调用此教师，也没有单独的事后 `e` 标签，记录 `x,z,r,b`。原冻结 `x` 仍用于在线决策；`x_final` 是采集后的结果字段。教师输出不合法或证据不足会保留错误或 `?`，不会编造标签。`--exposure-rules` 指定原有动作前估计规则，缺失时原冻结 `x` 的旧估计值仍为 `?`。无记忆或预算不足的检查点不随机化，保留费用和排除原因，未知终局不算失败。完成后的续读和只读汇总均不发出模型请求；未完成会话无法自动恢复或重试。现有真实 Terminal 入口仍受文件系统协议及任务范围审核约束，新增真实后端需独立适配。
+
+若冻结来源 manifest 的目标任务尚无审核，可在目标运行配置的 `[environment]` 设置 `audit_map_path = "/absolute/path/to/audit-map.json"`。该 JSON 将任务 ID 映射到各自经恢复诊断和范围审核的 audit 记录；记录内容进入目标运行的环境配置，原来源 manifest 与库哈希不改动。`cave3 audit --task <target-id>` 可生成待审核诊断，需填写真实 reviewer、review_notes 并核实任务范围后才能用于映射；重复或不匹配的审核在采集前拒绝。
 
 第三部分包括只读数据入口、配对收益/风险/成本模型、组级校准、监督 gate、单臂 DR 与约束 bandit，使用见 [训练指南](docs/policy.md)。选型和最终执行见 [冻结评估](docs/evaluation.md)。配对输入需要同时保留原始 prepared 目录；加载时重新核对原始记录和任务资产。下列两个参数可重复填写，但只允许合并相同 manifest、来源库、actor、encoder 和效用设置的运行：
 

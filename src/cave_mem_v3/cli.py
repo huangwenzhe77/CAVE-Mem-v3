@@ -32,6 +32,12 @@ def _build_policy_dataset(args):
                for run, prepared in args.paired]
     sources.extend({"kind": "single", "run": run} for run in args.single)
     sources.extend({"kind": "auto", "run": run} for run in args.auto)
+    for run, exposure in args.exposure:
+        matches = [source for source in sources if source["kind"] in ("paired", "auto")
+                   and Path(source["run"]).resolve() == Path(run).resolve()]
+        if len(matches) != 1 or "exposure" in matches[0]:
+            raise ValueError("each --exposure RUN must match exactly one paired/auto source")
+        matches[0]["exposure"] = exposure
     dataset = write_policy_dataset(sources, args.output, role=args.role, validation_role=args.validation_role)
     return {"output": str(Path(args.output).resolve()), "dataset_hash": dataset["record_hash"],
             "fixture_only": dataset["fixture_only"], **dataset["summary"]}
@@ -297,10 +303,21 @@ def _env_factory(raw, manifest):
     revision = manifest["revision"]
     if not re.fullmatch(r"[0-9a-fA-F]{40}", revision):
         raise ValueError("pin the full 40-character Terminal-Bench commit before execution")
+    audit_map_path = raw["environment"].get("audit_map_path")
+    audit_map = read_json(audit_map_path) if audit_map_path else {}
+    if not isinstance(audit_map, dict) or not set(audit_map).issubset(
+            {task["task_id"] for task in manifest["tasks"]}):
+        raise ValueError("environment.audit_map_path must map registered task ids to audits")
+    if any(not isinstance(audit, dict) for audit in audit_map.values()):
+        raise ValueError("environment audit map entries must be records")
 
     def factory(task):
         protocol = {"max_steps": raw["study"].get("max_steps", 30),
                     **raw["environment"].get("protocol", {}), **task.get("protocol", {})}
+        if task["task_id"] in audit_map:
+            if "audit" in protocol or "audit_path" in protocol:
+                raise ValueError("task audit is duplicated between manifest and external map")
+            protocol["audit"] = copy.deepcopy(audit_map[task["task_id"]])
         terminal = task_from_directory(task["path"], task["task_id"],
                                        repository_commit=revision, protocol=protocol)
         expected = task.get("terminal_asset_hash")
@@ -510,6 +527,17 @@ def _summarize_target_auto(args):
     return summarize_target_auto(args.run)
 
 
+def _judge_paired_exposure(args):
+    from cave_mem_v3.interventions.exposure import judge_paired_exposure
+    teacher = _teacher(load_config(args.config))
+    return judge_paired_exposure(args.run, provider=teacher, output_dir=args.output)
+
+
+def _summarize_paired_exposure(args):
+    from cave_mem_v3.interventions.exposure import summarize_paired_exposure
+    return summarize_paired_exposure(args.run)
+
+
 def _summarize_target_single(args):
     from cave_mem_v3.interventions.single_outcomes import summarize_target_single
     return summarize_target_single(args.run)
@@ -688,8 +716,8 @@ def _audit(args):
     raw = load_config(args.config)
     manifest = load_manifest(args.manifest)
     task = next((t for t in manifest["tasks"] if t["task_id"] == args.task), None)
-    if task is None or task["role"] != "history":
-        raise ValueError("phase-one audit requires a registered historical task")
+    if task is None or task["role"] not in ("history", "target_train", "validation"):
+        raise ValueError("audit requires a registered history, target_train or validation task")
     env = _env_factory(raw, manifest)(task)
     try:
         env.reset(StudySpec(**raw["study"]).base_seed)
@@ -774,6 +802,8 @@ def main(argv=None):
                    help="paired run directory and its original prepared directory; repeat for additional runs")
     p.add_argument("--single", action="append", default=[], help="single-arm run directory; may be repeated")
     p.add_argument("--auto", action="append", default=[], help="automatic paired-or-single run directory; may be repeated")
+    p.add_argument("--exposure", nargs=2, action="append", default=[], metavar=("RUN", "LABELS"),
+                   help="post-pair teacher exposure labels for a paired/auto source; may be repeated")
     p.add_argument("--output", required=True)
     p = sub.add_parser("check", help="check pending configuration, without model/network access")
     p.add_argument("--config", required=True)
@@ -836,6 +866,11 @@ def main(argv=None):
     p.add_argument("--low-risk-probability", type=float, default=.05)
     p.add_argument("--high-risk-probability", type=float, default=.75)
     p = sub.add_parser("summarize-target-auto", help="recompute paired and randomized single-arm observations")
+    p.add_argument("--run", required=True)
+    p = sub.add_parser("judge-paired-exposure", help="assess original-action mechanism exposure after paired target execution")
+    for key in ("run", "config", "output"):
+        p.add_argument("--" + key, required=True)
+    p = sub.add_parser("summarize-paired-exposure", help="verify saved post-pair teacher exposure assessments")
     p.add_argument("--run", required=True)
     p = sub.add_parser("retrieve-target", help="retrieve one verified memory for each selected target checkpoint")
     p.add_argument("--target-run", required=True)

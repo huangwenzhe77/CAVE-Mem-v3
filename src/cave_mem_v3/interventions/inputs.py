@@ -288,7 +288,7 @@ def load_prepared_run(target_dir: str | Path, bank: dict) -> tuple[dict, list[di
                     raise ValueError("prepared trace identity mismatch")
                 episode = trace["episode"]
                 sample = episode.get("checkpoint_sampling") or {}
-                if episode.get("status") == "error" or trace.get("cleanup_errors"):
+                if episode.get("status") in ("error", "preparation_error") or trace.get("cleanup_errors"):
                     base.update(status="blocked", reason="preparation_error")
                 elif sample.get("status") == "no_selection":
                     # The original no-selection trace may have ended naturally. No outcome is copied.

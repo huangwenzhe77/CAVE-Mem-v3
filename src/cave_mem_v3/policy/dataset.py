@@ -87,15 +87,38 @@ def _descriptor(value):
     if not isinstance(value, dict) or value.get("kind") not in ("paired", "single", "auto"):
         raise ValueError("dataset source must declare paired, single, or auto kind")
     required = {"kind", "run"} | ({"prepared"} if value["kind"] == "paired" else set())
-    if set(value) != required:
+    if set(value) not in (required, required | {"exposure"}) or ("exposure" in value and value["kind"] == "single"):
         raise ValueError("paired sources require run and original prepared directories; single/auto sources require run")
     result = {"kind": value["kind"]}
-    for name in required - {"kind"}:
+    for name in set(value) - {"kind"}:
         path = Path(value[name]).resolve(strict=True)
         if not path.is_dir():
             raise ValueError("dataset source paths must be directories")
         result[name] = str(path)
     return result
+
+
+def _posthoc_exposure(source, run):
+    if "exposure" not in source:
+        return {}
+    from cave_mem_v3.interventions.exposure import summarize_paired_exposure
+    root = Path(source["exposure"])
+    judge_run = checked(read_json(root / "run.json"), schema="posthoc-exposure-run.v1")
+    if (judge_run["source_run_hash"] != run["record_hash"]
+            or Path(judge_run["source_run"]).resolve() != Path(source["run"]).resolve()):
+        raise ValueError("posthoc exposure labels belong to another target run")
+    summary = summarize_paired_exposure(root)
+    return {label["pair_input_hash"]: label for label in summary["labels"]}
+
+
+def _add_posthoc_x(row, label):
+    if label is None:
+        return row
+    row["posthoc_exposure_status"] = label["status"]
+    if label["status"] == "assessed":
+        row["x_final"] = copy.deepcopy(label["x_final"])
+        row["e_observed"] = copy.deepcopy(label["assessment"])
+    return row
 
 
 def _conditions(prepared, bank, kind):
@@ -184,6 +207,7 @@ def _paired(source, run):
         raise ValueError("invalid original preparation cannot enter a policy dataset")
     summary = summarize_target_pairs(source["run"])
     tasks = {task["task_id"]: task for task in prepared["manifest"]["tasks"]}
+    exposure = _posthoc_exposure(source, run)
     memories = {m.memory_id: m for m in bank_memories(run["bank"])} if run["bank"]["memories"] else {}
     rows, identities = [], []
     for index, (item, observation) in enumerate(zip(inputs, summary["pairs"])):
@@ -225,7 +249,7 @@ def _paired(source, run):
             observation=observation, inclusion=inclusion, checkpoint=checkpoint, costs=costs)
         row["provenance"].update(preparation_trace_path=str(path), trace_hash=item.get("trace_hash"),
                                  raw_file_hash=item.get("raw_file_hash"))
-        rows.append(row)
+        rows.append(_add_posthoc_x(row, exposure.get(item["record_hash"])))
     return prepared, summary, rows, identities
 
 
@@ -260,6 +284,7 @@ def _auto(source, run):
     root = Path(source["run"])
     tasks = {task["task_id"]: task for task in run["manifest"]["tasks"]}
     memories = {m.memory_id: m for m in bank_memories(run["bank"])} if run["bank"]["memories"] else {}
+    exposure = _posthoc_exposure(source, run)
     rows, identities = [], []
     for index, entry in enumerate(summary["observations"]):
         task_id = run["task_order"][index]
@@ -295,12 +320,13 @@ def _auto(source, run):
             if path.exists():
                 identities.extend(_response_identities(read_json(path)))
             kind, checkpoint = "single", item.get("public_point_hash")
-        rows.append(_row(run, run, tasks[task_id], trace_id, kind=kind,
+        row = _row(run, run, tasks[task_id], trace_id, kind=kind,
             input_hash=item["record_hash"], state=state,
             memory=memories.get(state.get("memory_id")) if state else None,
             observation=observation, inclusion=observation.get("inclusion_probability")
                 if kind == "single" else item["selection"].get("inclusion_probability"),
-            checkpoint=checkpoint, costs=costs))
+            checkpoint=checkpoint, costs=costs)
+        rows.append(_add_posthoc_x(row, exposure.get(pair_item["record_hash"]) if kind == "paired" else None))
     return run, summary, rows, identities
 
 
@@ -407,7 +433,7 @@ def build_policy_dataset(sources, *, role="target_train", validation_role=None):
             "label_counts": {name: sum(r["label_masks"][name] for r in rows) for name in rows[0]["label_masks"]},
             "target_groups": len({r["grouping"]["target_group"] for r in rows}),
             "source_target_groups": len({r["grouping"]["source_target_group"] for r in rows})},
-        "claim_boundary": "Only pre-treatment features are model inputs. Labels, assignment, costs and provenance are separate. Grouped data are not independent task replicates; fixture data are software checks only."})
+        "claim_boundary": "Pre-treatment features are live decision inputs. Post-pair x_final/e_observed are result-side teacher annotations, never live decision inputs. Labels, assignment, costs and provenance are separate. Grouped data are not independent task replicates; fixture data are software checks only."})
 
 
 def write_policy_dataset(sources, output, *, role="target_train", validation_role=None):
@@ -417,7 +443,7 @@ def write_policy_dataset(sources, output, *, role="target_train", validation_rol
         raise ValueError("policy dataset output exists; choose a new file")
     for source in sources:
         descriptor = _descriptor(source)
-        for name in ("run", "prepared"):
+        for name in ("run", "prepared", "exposure"):
             if name in descriptor and path.is_relative_to(Path(descriptor[name])):
                 raise ValueError("policy dataset output must be outside raw source directories")
     dataset = build_policy_dataset(sources, role=role, validation_role=validation_role)
@@ -431,7 +457,7 @@ def load_policy_dataset(path, *, role="target_train", validation_role=None):
     dataset = checked(read_json(path), schema=SCHEMA if role == "target_train" else "policy-dataset.v2")
     if dataset["available_roles"] != [partition] or (role == "validation" and dataset.get("partition") != partition):
         raise ValueError("saved policy dataset partition mismatch")
-    sources = [{key: source[key] for key in ("kind", "run", "prepared") if key in source}
+    sources = [{key: source[key] for key in ("kind", "run", "prepared", "exposure") if key in source}
                for source in dataset["sources"]]
     if build_policy_dataset(sources, role=role, validation_role=validation_role) != dataset:
         raise ValueError("saved policy dataset differs from original audited sources")

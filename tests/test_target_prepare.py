@@ -3,6 +3,7 @@ import io
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -40,6 +41,12 @@ class CountingEnvironment(PreparationEnvironment):
     def step(self, action, seed=0):
         self.step_calls += 1
         return super().step(action, seed=seed)
+
+
+class MalformedDraftActor(ScriptedActor):
+    def propose(self, *args, **kwargs):
+        response = super().propose(*args, **kwargs)
+        return replace(response, action={"type": "__unparsed_action__"}, parse_error="invalid_json")
 
 
 class PrepareTargetTests(unittest.TestCase):
@@ -201,6 +208,33 @@ class PrepareTargetTests(unittest.TestCase):
         self.assertEqual(envs[-1].validate_calls, 0)
         self.assertEqual(envs[-1].step_calls, 0)
         self.assertEqual(envs[-1].snapshot()["state"]["steps"], 0)
+
+    def test_selected_unparsed_a0_is_preparation_error_not_a_ready_state(self):
+        from cave_mem_v3.interventions.inputs import load_prepared_run
+        manifest = build_manifest(
+            [{"task_id": "task-a", "group_id": "group-a", "role": "target_train"}],
+            benchmark="fixture", revision="v1")
+        bank = {"schema_version": "verified-source-bank.v3", "frozen": True,
+                "memory_count": 0, "memories": [], "audit_sources": {}}
+        bank["bank_hash"] = digest(bank)
+        envs = []
+        def factory(task):
+            env = CountingEnvironment(task_id=task["task_id"])
+            envs.append(env)
+            return env
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "run"
+            collect_target(manifest, role="target_train", spec=StudySpec(max_steps=4),
+                env_factory=factory, actor_factory=MalformedDraftActor, output_dir=root,
+                hazard=RiskHazard(low_risk_probability=.99, high_risk_probability=.99),
+                prepare_before_action=True, bank=bank, encoder=EncoderFixture())
+            trace = read_json(next((root / "traces").glob("*.json")))
+            _, inputs = load_prepared_run(root, bank)
+        self.assertEqual(trace["episode"]["status"], "preparation_error")
+        self.assertIsNone(trace["episode"]["success"])
+        self.assertNotIn("pre_treatment_state", trace["episode"]["steps"][-1])
+        self.assertEqual(inputs[0]["reason"], "preparation_error")
+        self.assertEqual(envs[-1].step_calls, 0)
 
 
 if __name__ == "__main__":

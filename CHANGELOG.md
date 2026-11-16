@@ -1,5 +1,20 @@
 # 变更记录
 
+## 2026-11-17 — 第一、二部分数据闭环与真实来源诊断
+
+| 文件 | 变更 |
+| --- | --- |
+| `src/cave_mem_v3/agents/runtime.py` | 缓存原动作无法解析时在准备阶段标记错误，避免生成不可加载的 prepared 记录 |
+| `src/cave_mem_v3/interventions/inputs.py` | 将准备错误作为可审计的阻断状态载入 |
+| `src/cave_mem_v3/interventions/exposure.py` | 配对结束后基于 Silent 原动作公开结果做独立教师判定，保存响应、用量、`e` 和最终 `x`；单臂不标注 |
+| `src/cave_mem_v3/policy/dataset.py` | 可选择绑定事后判定目录，配对行导出 `e_observed/x_final`，单臂行保持原标签结构 |
+| `src/cave_mem_v3/cli.py` | 增加判定及汇总命令，数据集支持 `--exposure RUN LABELS`；支持冻结 manifest 外的逐任务恢复审核映射和目标审核诊断 |
+| `tests/test_target_prepare.py`、`tests/test_posthoc_exposure.py`、`tests/test_terminal.py` | 覆盖格式错误阻断、配对盲判、单臂不标注、教师无效响应保留及外置审核映射 |
+| `tests/test_policy_dataset.py` | 路径身份断言解析 Windows 长短路径别名 |
+| `README.md`、`CHANGELOG.md` | 记录新命令、事后标签语义和文件变更 |
+
+本地完整离线检查先有 378 项通过，审核映射新增后再复测。H20 真实来源批次 `phase1-batch-20261116-r00` 的原始结果为 5 次尝试、4 次明确任务失败、1 次评分器故障；DeepSeek 为 4 条合格轨迹生成 3 条候选，1 条输出截断。此前 `verify` 因选错 manifest 版本在模型执行前退出；本次按采集哈希匹配的 `manifest-final-v3.json` 启动独立回放，旧日志保留。真实回放和目标数据尚须以最终产物统计，不能由离线测试推断通过率。
+
 ## 2026-11-16 — R-01 离线学习 fixture 的可识别风险样本
 
 | 文件 | 本卡变更 |

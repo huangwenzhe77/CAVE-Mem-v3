@@ -127,6 +127,18 @@ def run_episode(env, actor, *, spec: StudySpec, seed: int, checkpoint=None,
                               termination_reason="model_output_truncated",
                               actor_behavior={"kind": "truncated_response", "step_index": index})
                 break
+            if step["actor_response"] is not None and step["actor_response"].get("parse_error") is not None:
+                step["validation_error"] = "malformed_actor_action"
+                if (checkpoint_sampler is not None and sampling.get("selected") is True
+                        and prepare_selected is not None):
+                    record.update(status="preparation_error", success=None, utility=None,
+                                  termination_reason="malformed_cached_a0",
+                                  actor_behavior={"kind": "malformed_action", "step_index": index})
+                    break
+                record.update(status="invalid_action", success=False,
+                              termination_reason="invalid_actor_output",
+                              actor_behavior={"kind": "malformed_action", "step_index": index})
+                break
             if (checkpoint_sampler is not None and sampling.get("selected") is True):
                 sampled_action = copy.deepcopy(action)
                 if prepare_selected is not None:
@@ -221,7 +233,7 @@ def run_episode(env, actor, *, spec: StudySpec, seed: int, checkpoint=None,
                 record.update(status="error", success=None, utility=None,
                               error={"type": type(exc).__name__, "message": str(exc)})
         verifier = getattr(env, "verifier_report", None)
-        if verifier is not None and record["status"] != "pre_treatment_ready":
+        if verifier is not None and record["status"] not in ("pre_treatment_ready", "preparation_error"):
             record["private_verifier"] = copy.deepcopy(verifier)
         record["trace_hash"] = digest(record)
     return record

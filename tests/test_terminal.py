@@ -10,6 +10,7 @@ from cave_mem_v3.agents.providers import OpenAIConfig, OpenAICompatibleProvider,
 from cave_mem_v3.agents.runtime import run_episode
 from cave_mem_v3.environments.terminal import (PROTOCOL, DockerBackend, TerminalEnvironment,
     TerminalInfrastructureError, parse_verifier_result, task_from_directory)
+from cave_mem_v3.cli import _env_factory
 
 
 class MemoryBackend:
@@ -69,6 +70,23 @@ class TerminalTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_external_task_audit_preserves_frozen_manifest(self):
+        audit = {"scope": PROTOCOL, "asset_hash": self.task.asset_hash}
+        path = self.root.parent / (self.root.name + "-audit-map.json")
+        path.write_text(json.dumps({"task": audit}), encoding="utf-8")
+        self.addCleanup(path.unlink)
+        task = {"task_id": "task", "role": "target_train", "path": str(self.root),
+                "terminal_asset_hash": self.task.asset_hash,
+                "protocol": {"paired_scope": PROTOCOL}}
+        manifest = {"benchmark": "terminal-bench@2.0", "revision": "a" * 40,
+                    "tasks": [task]}
+        raw = {"study": {"max_steps": 4}, "environment": {"kind": "terminal",
+               "backend": "docker", "audit_map_path": str(path)}}
+        before = copy.deepcopy(manifest)
+        env = _env_factory(raw, manifest)(task)
+        self.assertEqual(env.configuration()["protocol"]["audit"], audit)
+        self.assertEqual(manifest, before)
 
     def test_no_automatic_restore_certification(self):
         env = TerminalEnvironment(self.task, backend=MemoryBackend())

@@ -260,5 +260,6 @@ class PolicyDatasetTests(unittest.TestCase):
             self.assertEqual(row["reason"], "preparation_error")
             self.assertIsNone(row["costs"]["shared"])
             self.assertEqual(row["costs"]["shared_status"], "unavailable_not_validated")
-            self.assertEqual(Path(row["provenance"]["preparation_trace_path"]), fixture["trace_path"])
+            self.assertEqual(Path(row["provenance"]["preparation_trace_path"]).resolve(),
+                             fixture["trace_path"].resolve())
             self.assertTrue(row["provenance"]["raw_file_hash"])
