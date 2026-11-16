@@ -1,5 +1,17 @@
 # 变更记录
 
+## 2026-11-16 — R-01 离线学习 fixture 的可识别风险样本
+
+| 文件 | 本卡变更 |
+| --- | --- |
+| `examples/four_phase_learning_demo.py` | 冻结 toy `operation_mode`，极少数任务允许未准备操作但准备有副作用；公开条件不直接揭示模式，原 history 仍为普通可修复任务 |
+| `tests/test_learning_integration.py` | 断言两臂恢复同一模式、真实生成的两种公开特征模式各有 H=0/1、完整拟合/选型/最终执行 |
+| `docs/task_cards.md` | R-01 的 Goal、Context、Rules、Acceptance 和进度 |
+| `docs/software_handoff.md`、`docs/server_handoff.md` | 尚未启动的真实来源建议卡顺延为 R-02，协议不变 |
+| `CHANGELOG.md` | 本卡逐文件记录与验证范围 |
+
+原诊断在 24 条训练 paired 行中，一种公开模式的 H=0/12，构成无正则 logistic 准完全分离；这是正确的不可用门禁，而非仅增加迭代次数可解决的问题。新离线 fixture 的任务模式在 manifest、环境配置和 checkpoint 中固定，不进入 actor 公开上下文；训练中两种相同特征模式分别得到 H=1/12 和 H=6/12，均有双类。Python 3.13 的完整离线示例实际拟合 7 个头和 gate，两种 bandit 均为 candidate，独立选型选中 paired-bandit，最终 12/12 任务有结局，原始证据 hash 不变。integration 8 项、supervised 17 项及可分样本拒绝测试通过，两项独立只读审核通过。特殊模式本次只落在训练任务，不证明隐藏机制留出泛化。全部仅为软件 fixture，0 真实模型/benchmark 请求；H20 Linux 全量检查待完成。
+
 ## 2026-11-16 — R-00 Terminal 来源运行前置修复
 
 | 文件 | 本卡变更 |

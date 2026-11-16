@@ -11,6 +11,7 @@ from cave_mem_v3.agents.providers import ScriptedActor
 from test_target_prepare import EncoderFixture
 from cave_mem_v3.interventions.inputs import seal
 from cave_mem_v3.policy.frozen import freeze_policy
+from cave_mem_v3.policy.features import feature_contract, feature_vector
 from cave_mem_v3.policy.rollout import collect_policy_validation
 from cave_mem_v3.policy.final_evaluation import collect_final_evaluation, export_final_evaluation_report, _checkpoint_coverage
 from cave_mem_v3.target_data.sampling import RiskHazard
@@ -47,6 +48,15 @@ class LearningClosureTests(unittest.TestCase):
         self.assertGreater(result['learned_final_decisions'],0)
         self.assertGreater(result['learned_final_reminder_assignments'],0)
         self.assertGreater(result['learned_final_effective_probability_range'][1],0)
+        train=read_json(self.root/'train.json')
+        contract=feature_contract(train['rows'][0]['features'])
+        patterns={}
+        for row in train['rows']:
+            key=tuple(feature_vector(row['features'],contract))
+            patterns.setdefault(key,set()).add(row['labels']['H'])
+            self.assertNotIn('waiver_fragile', str(row['features']))
+        self.assertEqual(len(patterns),2)
+        self.assertTrue(all(labels=={0,1} for labels in patterns.values()))
         model=read_json(self.root/'model.json')
         lock=read_json(self.root/'selection.lock')
         self.assertEqual(lock['winner']['bundle']['artifacts']['model'],model)
@@ -57,6 +67,27 @@ class LearningClosureTests(unittest.TestCase):
         self.assertIn('v=1|rho=1|e=1',report['checkpoint_coverage']['policies']['selected']['cells'])
         with self.assertRaisesRegex(ValueError,'new output'):
             demo.run_demo(self.root)
+
+    def test_hidden_operation_mode_is_frozen_before_both_arms(self):
+        source=demo.LearningFixture(task_id='mode-check',requires_preparation=True,
+                                    operation_mode='waiver_fragile')
+        context=source.reset(seed=7)
+        checkpoint=source.snapshot()
+        self.assertEqual(checkpoint['configuration']['operation_mode'],'waiver_fragile')
+        self.assertNotIn('operation_mode',context.facts)
+        self.assertNotIn('waiver_fragile',str(context))
+        silent=demo.LearningFixture(task_id='mode-check',requires_preparation=True,
+                                    operation_mode='waiver_fragile')
+        remind=demo.LearningFixture(task_id='mode-check',requires_preparation=True,
+                                    operation_mode='waiver_fragile')
+        silent.restore(checkpoint)
+        remind.restore(checkpoint)
+        self.assertEqual(silent.state_fingerprint(),remind.state_fingerprint())
+        self.assertFalse(silent.step({'type':'operate'}).terminal)
+        self.assertTrue(silent.step({'type':'finish'}).success)
+        self.assertFalse(remind.step({'type':'prepare'}).success)
+        with self.assertRaisesRegex(ValueError,'configuration mismatch'):
+            demo.LearningFixture(task_id='mode-check',requires_preparation=True).restore(checkpoint)
 
     def test_no_memory_validation_never_uses_encoder_retrieval_features_or_reminder(self):
         with patch('cave_mem_v3.interventions.single.retrieve_memory',side_effect=AssertionError('retrieval')),\

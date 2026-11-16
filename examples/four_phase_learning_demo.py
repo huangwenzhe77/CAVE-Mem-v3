@@ -40,8 +40,32 @@ from cave_mem_v3.target_data.sampling import RiskHazard
 
 
 class LearningFixture(PreparationEnvironment):
+    """A fixed hidden mode makes preparation helpful or harmful in this toy task."""
+    def __init__(self, *, operation_mode='normal', **kwargs):
+        super().__init__(**kwargs)
+        if operation_mode not in ('normal','waiver_fragile'):
+            raise ValueError('unsupported learning fixture operation mode')
+        self.operation_mode = operation_mode
+
     def configuration(self):
-        return {**super().configuration(),'learning_fixture_revision':'public-two-conditions.v1'}
+        return {**super().configuration(),'learning_fixture_revision':'public-two-conditions.v2',
+                'operation_mode':self.operation_mode}
+
+    def step(self, action, seed=0):
+        state=self._require()
+        valid,_=self.validate_action(action)
+        if (valid and self.operation_mode=='waiver_fragile' and self.requires_preparation
+                and state['phase']=='ready' and not state['prepared']
+                and action['type'] in ('operate','prepare')):
+            state['steps']+=1
+            if action['type']=='prepare' or state['steps']>=self.max_steps:
+                state.update(phase='failed',terminal=True,success=False)
+            else:
+                state['phase']='operated'
+            state['history'].append({'action':{'type':action['type']},
+                                     'observation':f"phase={state['phase']}; prepared={state['prepared']}"})
+            return EnvStep(self.observe(),state['terminal'],state['success'])
+        return super().step(action,seed=seed)
 
     def finalize(self):
         if not self.terminal_status()[0]:
@@ -73,7 +97,8 @@ class LearningEncoder:
 
 
 def environment(task):
-    return LearningFixture(task_id=task['task_id'],requires_preparation=task.get('fixture_condition','benefit')=='benefit',max_steps=4)
+    return LearningFixture(task_id=task['task_id'],requires_preparation=task.get('fixture_condition','benefit')=='benefit',
+                           operation_mode=task.get('fixture_operation_mode','normal'),max_steps=4)
 
 
 def _hashes(paths):
@@ -91,9 +116,15 @@ def run_demo(output):
     for role,subrole,n in [('target_train',None,24),('validation','calibration',12),('validation','selection',8),('test',None,12)]:
         for i in range(n):
             prefix=subrole or role
+            # Names denote public conditions, not each task's observed reminder effect.
             condition='benefit' if i%2==0 else 'harm'
+            task_id=prefix+'-'+str(i)
+            operation_mode=('waiver_fragile' if condition=='benefit'
+                            and int.from_bytes(hashlib.sha256(task_id.encode()).digest()[:2],'big')%32==0
+                            else 'normal')
             task={'task_id':prefix+'-'+str(i),'group_id':prefix+'-group-'+str(i),'role':role,
-                  'family':condition,'mechanism':'software-two-condition','fixture_condition':condition}
+                  'family':condition,'mechanism':'software-two-condition','fixture_condition':condition,
+                  'fixture_operation_mode':operation_mode}
             if subrole:
                 task['validation_role']=subrole
             tasks.append(task)

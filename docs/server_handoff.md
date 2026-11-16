@@ -31,14 +31,14 @@ python3 -m venv .venv
 
 `configs/phase1/server.toml` 记录过旧服务器的模型路径、镜像快照目录和工程预算，`configs/benchmarks/terminal.example.json` 仍含占位任务。它们是参考模板，不能克隆后直接启动真实采集。在服务器复制为被 Git 忽略的 `configs/phase1/server.local.toml`，任务 catalog 放在被忽略的 `data/` 下；填写并冻结实际地址、模型/权重版本、提示、预算、种子、任务资产及依赖组。密钥只通过配置的 `api_key_env` 对应环境变量提供，不写入 TOML、Git 或输出日志。若继续使用 `scripts/phase1_actor_service.py`，先注意该脚本固定读取 `server.toml`，并非上述 `.local.toml`；本地配置下应使用 CLI 或先专门修改该调度脚本。
 
-## 下一张建议任务卡：R-01 真实来源小样本闭环
+## 下一张建议任务卡：R-02 真实来源小样本闭环
 
 - **Goal：** 冻结一批真实 history 任务，采集完整轨迹，生成教师修正候选，完成恢复审核和 K=2 来源回放；有合格项时冻结新库。
 - **Context：** 代码路线已通过离线测试，但旧 pilot 和模板配置不能作为新批正式实验输入。第二部分的真实目标实验需要新规则合格来源库。
 - **Rules：** 只访问 history 任务；按任务、模板和已知依赖组隔离其余角色。先冻结 benchmark commit、资产/镜像哈希、actor 与 teacher 身份、提示、预算、种子和接受阈值。教师候选只是待检验假说；恢复/评分错误或 pending 不得跳过、补跑或重标。超出已审核 Terminal 文件系统协议的任务先提出具体 adapter/协议变更供审阅。
 - **Acceptance：** 每个计划运行、候选与两组回放都有可追踪的完成、失败或 pending 记录；验证器能按新 v6 规则独立重核。合格记忆数可以为零，需报告分母、原因、实际模型/成本和未解决限制，不以零产出为由放宽门槛。
 
-先完成 R-01，再选择一张真实 `target_train` 采集卡。不要从 fixture 示例或旧临时库启动第三部分训练。
+先完成 R-02，再选择一张真实 `target_train` 采集卡。不要从 fixture 示例或旧临时库启动第三部分训练。
 
 服务器侧建议按以下顺序推进，每步用新的 `runs/<run-id>/` 目录保存原始产物：
 
