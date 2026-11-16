@@ -591,7 +591,9 @@ def _candidates(args):
                 raise ValueError("prior candidate batch has unregistered candidates")
         plan = {"source_run_hash": traces[0]["run_hash"], "source_trace_hashes": [t["trace_hash"] for t in traces],
                 "provider_config": provider.configuration(), "max_candidates": args.max_candidates,
-                "schedule": [t["trace_id"] for t in failures], "reuse_source_hash": prior_hash}
+                "schedule": [t["trace_id"] for t in failures]}
+        if prior_hash is not None:
+            plan["reuse_source_hash"] = prior_hash
         plan["plan_hash"] = digest(plan)
         journal = Path(str(args.output) + ".generation")
         if journal.exists():
