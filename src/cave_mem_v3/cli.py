@@ -544,13 +544,15 @@ def _summarize_target_single(args):
 
 
 def _candidates(args):
-    from cave_mem_v3.memory_generation.candidates import candidate_templates, eligible_source_steps, generate_candidates
+    from cave_mem_v3.memory_generation.candidates import candidate_templates, eligible_source_steps, generate_candidates, validate_candidate
     from cave_mem_v3.memory_generation.collection import scored_source_outcome
     if args.max_candidates != 1:
         raise ValueError("each eligible source trace must have exactly one candidate")
     _new_file(args.output)
     traces = _collection_traces(args.collection)
     if not args.generate:
+        if args.reuse_successes_from:
+            raise ValueError("--reuse-successes-from requires --generate")
         candidates = candidate_templates(traces, max_steps_per_trace=args.max_candidates)
         generations = []
     else:
@@ -563,9 +565,33 @@ def _candidates(args):
                      "reason": ("no_executable_source_step" if scored_source_outcome(t["episode"]) is False
                                 else "not_a_scored_task_failure")}
                     for t in traces if t["episode"].get("success") is False and t not in failures]
+        reused = {}
+        prior_hash = None
+        if args.reuse_successes_from:
+            prior = read_json(args.reuse_successes_from)
+            if (prior.get("schema_version") != "source-candidates.v3"
+                    or prior.get("source_run_hash") != traces[0]["run_hash"]
+                    or len(prior.get("generations", [])) != len(failures)):
+                raise ValueError("prior candidate batch differs from this historical collection")
+            prior_hash = digest(prior)
+            prior_candidates = prior.get("candidates", [])
+            if not isinstance(prior_candidates, list):
+                raise ValueError("prior candidate batch is invalid")
+            for trace, generation in zip(failures, prior["generations"]):
+                matches = [candidate for candidate in prior_candidates
+                           if candidate.get("source_trace_id") == trace["trace_id"]]
+                if generation.get("status") == "completed":
+                    if len(matches) != 1 or matches[0].get("generation") != generation:
+                        raise ValueError("prior completed generation has no unique bound candidate")
+                    validate_candidate(matches[0], trace)
+                    reused[trace["trace_id"]] = {"candidates": matches, "generation": generation}
+                elif generation.get("status") != "error" or matches:
+                    raise ValueError("prior failed generation contains an unexpected candidate")
+            if len(prior_candidates) != len(reused):
+                raise ValueError("prior candidate batch has unregistered candidates")
         plan = {"source_run_hash": traces[0]["run_hash"], "source_trace_hashes": [t["trace_hash"] for t in traces],
                 "provider_config": provider.configuration(), "max_candidates": args.max_candidates,
-                "schedule": [t["trace_id"] for t in failures]}
+                "schedule": [t["trace_id"] for t in failures], "reuse_source_hash": prior_hash}
         plan["plan_hash"] = digest(plan)
         journal = Path(str(args.output) + ".generation")
         if journal.exists():
@@ -587,25 +613,29 @@ def _candidates(args):
             else:
                 if pending.exists():
                     raise ValueError("candidate request was interrupted; preserve its journal and reconcile its outcome before retrying")
-                with pending.open("x", encoding="utf-8") as stream:
-                    json.dump({"plan_hash": plan["plan_hash"], "trace_hash": trace["trace_hash"],
-                               "status": "request_started"}, stream)
-                successes = [t for t in traces if t["task_id"] == trace["task_id"]
-                             and scored_source_outcome(t["episode"]) is True]
-                try:
-                    result = generate_candidates(trace, provider, successful_traces=successes,
-                                                 max_candidates=args.max_candidates, seed=trace["seed"])
-                except Exception as exc:
-                    generation = getattr(exc, "generation", None)
-                    if generation is None:
-                        attempt = getattr(exc, "attempt", None)
-                        generation = {"status": "error", "error_type": type(exc).__name__,
-                                      "attempt": attempt, "usage": attempt.get("usage") if attempt else None}
-                    result = {"candidates": getattr(exc, "candidates", []), "generation": generation}
+                if trace["trace_id"] in reused:
+                    result = reused[trace["trace_id"]]
+                else:
+                    with pending.open("x", encoding="utf-8") as stream:
+                        json.dump({"plan_hash": plan["plan_hash"], "trace_hash": trace["trace_hash"],
+                                   "status": "request_started"}, stream)
+                    successes = [t for t in traces if t["task_id"] == trace["task_id"]
+                                 and scored_source_outcome(t["episode"]) is True]
+                    try:
+                        result = generate_candidates(trace, provider, successful_traces=successes,
+                                                     max_candidates=args.max_candidates, seed=trace["seed"])
+                    except Exception as exc:
+                        generation = getattr(exc, "generation", None)
+                        if generation is None:
+                            attempt = getattr(exc, "attempt", None)
+                            generation = {"status": "error", "error_type": type(exc).__name__,
+                                          "attempt": attempt, "usage": attempt.get("usage") if attempt else None}
+                        result = {"candidates": getattr(exc, "candidates", []), "generation": generation}
                 entry = {"plan_hash": plan["plan_hash"], "trace_hash": trace["trace_hash"], "result": result}
                 entry["entry_hash"] = digest(entry)
                 write_json(completed, entry)
-                pending.unlink()
+                if pending.exists():
+                    pending.unlink()
             candidates.extend(result["candidates"])
             generations.append(result["generation"])
     output = {"schema_version": "source-candidates.v3", "candidates": candidates,
@@ -613,6 +643,10 @@ def _candidates(args):
               "note": "Unverified hypotheses. Editing requires replay of the finalized candidate."}
     if args.generate:
         output["excluded_source_traces"] = excluded
+        if prior_hash is not None:
+            output["reuse_source"] = {"path": str(Path(args.reuse_successes_from).resolve()),
+                                      "content_hash": prior_hash,
+                                      "reused_trace_ids": sorted(reused)}
     write_json(args.output, output)
     return {"output": str(Path(args.output).resolve()), "candidate_count": len(candidates),
             "generation_errors": sum(g.get("status") == "error" for g in generations),
@@ -886,6 +920,8 @@ def main(argv=None):
     p.add_argument("--max-candidates", type=int, default=1,
                    help="one candidate per eligible failed history trace (fixed protocol)")
     p.add_argument("--generate", action="store_true")
+    p.add_argument("--reuse-successes-from",
+                   help="reuse validated successful generations from a prior batch of the same history; retry only failures")
     p.add_argument("--config")
     p = sub.add_parser("verify", help="independent matched source replay")
     for key in ("config", "manifest", "collection", "candidates", "output"):

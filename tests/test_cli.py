@@ -148,6 +148,23 @@ class CommandTests(unittest.TestCase):
                 self.invoke("candidates", "--collection", collection, "--output", output,
                             "--generate", "--config", config)
                 self.assertEqual(len(calls), 2)
+            retry_calls = []
+            def repaired_transport(payload):
+                retry_calls.append(payload)
+                return {"model": "Qwen/Qwen2.5-7B-Instruct",
+                        "choices": [{"message": {"content": json.dumps({"candidates": [candidate]})}}],
+                        "usage": {"prompt_tokens": 100, "completion_tokens": 30}}
+            retry_provider = OpenAICompatibleProvider(OpenAIConfig(max_output_tokens=16384),
+                                                      transport=repaired_transport)
+            recovered = root / "recovered.json"
+            with patch("cave_mem_v3.cli._teacher", return_value=retry_provider):
+                result = self.invoke("candidates", "--collection", collection, "--output", recovered,
+                                     "--generate", "--config", config,
+                                     "--reuse-successes-from", output)
+            self.assertEqual(result["candidate_count"], 2)
+            self.assertEqual(result["generation_errors"], 0)
+            self.assertEqual(len(retry_calls), 1)
+            self.assertEqual(len(read_json(recovered)["reuse_source"]["reused_trace_ids"]), 1)
 
     def test_automatic_generation_excludes_unparsed_actor_failure(self):
         from cave_mem_v3.agents.providers import OpenAIConfig, OpenAICompatibleProvider

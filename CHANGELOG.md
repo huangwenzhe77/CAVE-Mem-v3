@@ -8,9 +8,10 @@
 | `src/cave_mem_v3/interventions/inputs.py` | 将准备错误作为可审计的阻断状态载入 |
 | `src/cave_mem_v3/interventions/exposure.py` | 配对结束后基于 Silent 原动作公开结果做独立教师判定，保存响应、用量、`e` 和最终 `x`；单臂不标注 |
 | `src/cave_mem_v3/policy/dataset.py` | 可选择绑定事后判定目录，配对行导出 `e_observed/x_final`，单臂行保持原标签结构 |
-| `src/cave_mem_v3/cli.py` | 增加判定及汇总命令，数据集支持 `--exposure RUN LABELS`；支持冻结 manifest 外的逐任务恢复审核映射和目标审核诊断 |
+| `src/cave_mem_v3/cli.py` | 增加判定及汇总命令，数据集支持 `--exposure RUN LABELS`；支持冻结 manifest 外的逐任务恢复审核映射和目标审核诊断；失败的教师生成可在新批次重试且复用已成功候选 |
 | `tests/test_target_prepare.py`、`tests/test_posthoc_exposure.py`、`tests/test_terminal.py` | 覆盖格式错误阻断、配对盲判、单臂不标注、教师无效响应保留及外置审核映射 |
 | `tests/test_policy_dataset.py` | 路径身份断言解析 Windows 长短路径别名 |
+| `tests/test_cli.py` | 验证教师失败后只补生成失败项、已成功项不重复收费 |
 | `src/cave_mem_v3/environments/terminal.py` | CTRF 将测试执行阶段的 agent 产物缺失视为任务失败；setup、collection、teardown 错误仍拒绝评分 |
 | `src/cave_mem_v3/memory_generation/candidates.py` | 教师仍只提一个历史候选，提示要求替换动作直接修复任务产物并适配剩余预算，避免只提诊断命令 |
 | `README.md`、`CHANGELOG.md` | 记录新命令、事后标签语义和文件变更 |
