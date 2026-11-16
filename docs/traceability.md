@@ -8,7 +8,7 @@
 | --- | --- | --- | --- |
 | R1 | §3.1、Eq. (6)，memory tuple Eq. (1) | 图1：运行 history、提出失败机制/修正/适用条件、原动作与修正动作做 K 次来源重放、比较收益并冻结已验证记忆 | 每条主库记忆必须关联原始轨迹、候选条件、K=2 独立配对证据；两组修正均成功、配对有效且均值收益严格超过 epsilon。教师意见不代替回放证据 |
 | R2 | §2.1 Eq. (2)、§3.2、Algorithm 1 第 3–5 行 | 图2：目标任务到候选检查点；检索最多一个记忆；缓存未见记忆的 `a0`；在结局前评估 `v/ρ/e/d/b` 并冻结 `x`；再随机分 Silent/Remind | 特征只用干预前可见资料；`e_t` 是独立的动作暴露量，v/ρ/e 可未知。不得让未来臂结果影响 `a0/x` |
-| R3 | §2.2 Eq. (3)–(5)、§3.3、Algorithm 1 第 6 行 | 图2：可恢复检查点执行同一检查点两臂，记录效用差 `D` 和配对回退 `H`；不可恢复检查点只执行随机分配的一臂并记录 propensity | 配对与单臂记录是不同统计对象。单臂没有已观察个体 `D/H/rescue`；恢复失败不降级成配对 |
+| R3 | §2.2 Eq. (3)–(5)、§3.3、Algorithm 1 第 6 行 | 图2：可恢复检查点执行同一检查点两臂，记录效用差 `D` 和配对回退 `H`；不可恢复检查点只执行随机分配的一臂并记录 propensity | `collect-auto-target` 在原活会话关闭前审核实际检查点；通过则配对，未通过则在该活会话单臂。分流只发生在处理前；配对已开始后的错误不改成单臂。两类标签仍严格区分 |
 | R4 | §3.3 要求训练/validation/test 按任务族、来源机制和目标模板隔离；§4.1 提到 validation calibration，§4.2 要求 full-task validation；proposal 正文并未规定 calibration/selection 必须是两个独立子集 | 图2至图4的数据依赖：图3提到校准相关评估和“验证集选择策略”，但没有单独画出 calibration 与 selection 两个数据分区；图4要求未见任务评估 | 代码额外把 validation 显式分成 calibration 与 selection 两种子角色，避免同一验证结果既校准模型又选策略。这是实现层的数据隔离约束，不是流程图逐字要求；最终 test 仍只经冻结计划授权 |
 | R5 | §4.1 Eq. (7) | 图3左：配对数据训练收益 `τ(x)` 与风险 `h(x)`，以校准结果构造监督初始策略 `πSFT` | 收益、伤害、各成本头分别按有效标签掩码拟合；独立校准；用同容量 gate 作为监督基线 |
 | R6 | §4.2 Eq. (8)–(9) | 图3右：估计 `μ0(x), μ1(x)`，用 DR 目标相对 Silent 评估/训练策略；配对直接目标与单臂 DR 分开 | 组级交叉拟合、propensity、权重/ESS/截断诊断；DR 是估计量，非伪造反事实标签；当前 DR bandit 的初始化仍需兼容配对模型/校准/gate |
@@ -28,6 +28,7 @@
 | `src/cave_mem_v3/target_data/collection.py` | R2、R4 | 在已有 prepared 记录中加入可审计的内部执行配置身份，供前瞻 selection 绑定及防旁路替换 |
 | `src/cave_mem_v3/target_data/sampling.py` | R2、R4、R8、R9 | outcome-blind 检查点抽样；最终 test 必须由计划授权；增加 no_memory 专用禁用抽样器 |
 | `src/cave_mem_v3/interventions/collection.py` | R3、R4 | 将验证子角色传入已有配对执行路径并保持数据身份 |
+| `src/cave_mem_v3/interventions/auto.py` | R2、R3 | 保留目标活会话、按实际恢复审核结果分流，并重核配对或单臂原始产物 |
 | `src/cave_mem_v3/interventions/execution.py` | R3、R8 | 增加独立冻结策略执行协议；缓存动作、双臂权限检查与旧配对合同保持兼容 |
 | `src/cave_mem_v3/interventions/inputs.py` | R3、R4 | 为新执行/计划记录提供封存和只读检查合同 |
 | `src/cave_mem_v3/interventions/outcomes.py` | R3、R4 | 重核新增执行模式的事件、标签、身份与成本，保持原始未知状态 |

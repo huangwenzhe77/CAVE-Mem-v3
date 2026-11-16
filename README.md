@@ -85,6 +85,14 @@ cave3 collect-single-target --config <frozen.toml> --manifest <manifest.json> --
 cave3 summarize-target-single --run <single-directory>
 ```
 
+若同一任务清单中既有可恢复又有不可恢复检查点，使用 `collect-auto-target`。它保留选中的活会话，先对该点做独立恢复审核：通过则从同一检查点执行 Silent/Remind 配对；未通过则在未执行原动作的活会话随机分配并执行一臂。分流决定及失败审核均保存；任一分支开始后不再改换路线，未确认完成的外部请求不自动重试。单臂概率必须预先固定：
+
+```bash
+cave3 collect-auto-target --config <frozen.toml> --manifest <manifest.json> --bank <bank.json> --output <new-auto-directory> --role target_train --encoder-path <local-encoder-directory> --encoder-revision <pinned-revision> --assignment-probability 0.5
+cave3 summarize-target-auto --run <auto-directory>
+cave3 build-policy-dataset --auto <auto-directory> --output <new-dataset.json>
+```
+
 `--assignment-probability` 是预先固定的 `P(Remind)`，必须显式填写且严格介于 0 和 1；检查点纳入概率另存。`--exposure-rules` 可指定已有暴露规则，缺失时保留 `e=?`。单臂仅保存观察到的结局和效用及分配概率，不生成配对 D/H/rescue。无记忆或预算不足的检查点不随机化，保留费用和排除原因，未知终局不算失败。完成后的续读和只读汇总均不发出模型请求；未完成会话无法自动恢复或重试。现有真实 Terminal 入口仍受文件系统协议及任务范围审核约束，新增真实后端需独立适配。
 
 第三部分包括只读数据入口、配对收益/风险/成本模型、组级校准、监督 gate、单臂 DR 与约束 bandit，使用见 [训练指南](docs/policy.md)。选型和最终执行见 [冻结评估](docs/evaluation.md)。配对输入需要同时保留原始 prepared 目录；加载时重新核对原始记录和任务资产。下列两个参数可重复填写，但只允许合并相同 manifest、来源库、actor、encoder 和效用设置的运行：

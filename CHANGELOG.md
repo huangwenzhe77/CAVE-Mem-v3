@@ -468,3 +468,12 @@ Python 3.12 下 `python -m unittest discover -s tests -v`：**77 项通过**。�
 独立审核发现并修复了每任务次数上限被忽略、未填 K 静默默认、初始化异常记录缺失、候选模型失败计量丢失、叙述条件不可执行及真实响应模型身份漂移。复核未发现未修复的 P1/P2 问题。
 
 验证范围是软件测试及注入后端。没有下载模型，没有运行真实 Qwen 服务、Docker 容器或官方 benchmark，因而没有实证成功率/失败率或科研性能结论。
+## 2026-11-16 — S2-03 目标检查点自动分流（本地离线实现）
+
+- `src/cave_mem_v3/interventions/auto.py`：新增同一活会话选点、实际恢复审核、配对或随机单臂分流，以及只读混合结果重核。恢复失败在处理开始前转单臂；处理开始后的失败保持原路线。
+- `src/cave_mem_v3/interventions/collection.py`：抽出已审核配对的双臂执行器，供原配对入口和新自动入口复用。
+- `src/cave_mem_v3/interventions/single_outcomes.py`：允许自动入口的单臂会话带冻结分流记录。
+- `src/cave_mem_v3/policy/dataset.py`：混合采集目录导出逐行 `paired`/`single` 训练数据，保留各自标签掩码。
+- `src/cave_mem_v3/cli.py`：新增 `collect-auto-target`、`summarize-target-auto` 和数据导出的 `--auto` 来源。
+- `tests/test_target_auto.py`：离线覆盖恢复通过、不可恢复、实际审核失败后原会话单臂，以及对应训练标签。
+- `README.md`、`docs/experiment_design.md`、`docs/policy.md`、`docs/traceability.md`、`docs/task_cards.md`：记录分流协议、命令、训练数据口径与本卡状态。

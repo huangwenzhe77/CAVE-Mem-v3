@@ -446,7 +446,9 @@ def _session(directory, run, task, trace_id, seed, memories):
     if not directory.exists():
         return seal(row)
     allowed = {"attempt.json", "preparation.json", "input.json", "assignment.json", "result.json",
-               "closed.json", "pending.json", "preparation_events", "events"}
+                "closed.json", "pending.json", "preparation_events", "events"}
+    if run.get("schema_version") == "target-auto-run.v1":
+        allowed.add("route.json")
     if any(path.name not in allowed for path in directory.iterdir()):
         raise ValueError("unregistered single-session artifacts or extra treatment arm")
     attempt = checked(read_json(directory / "attempt.json"), schema="target-single-attempt.v1")

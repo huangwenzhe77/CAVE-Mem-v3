@@ -31,6 +31,7 @@ def _build_policy_dataset(args):
     sources = [{"kind": "paired", "run": run, "prepared": prepared}
                for run, prepared in args.paired]
     sources.extend({"kind": "single", "run": run} for run in args.single)
+    sources.extend({"kind": "auto", "run": run} for run in args.auto)
     dataset = write_policy_dataset(sources, args.output, role=args.role, validation_role=args.validation_role)
     return {"output": str(Path(args.output).resolve()), "dataset_hash": dataset["record_hash"],
             "fixture_only": dataset["fixture_only"], **dataset["summary"]}
@@ -466,7 +467,10 @@ def _summarize_target_pairs(args):
 
 def _collect_single_target(args):
     from cave_mem_v3.benchmarks.tasks import load_manifest
-    from cave_mem_v3.interventions.single import collect_single_target
+    if args.command == "collect-auto-target":
+        from cave_mem_v3.interventions.auto import collect_target_auto as collector
+    else:
+        from cave_mem_v3.interventions.single import collect_single_target as collector
     from cave_mem_v3.target_data.pre_treatment_state import validate_exposure_rules
     from cave_mem_v3.target_data.retrieval import SentenceTransformerEncoder
     from cave_mem_v3.target_data.sampling import RiskHazard
@@ -491,10 +495,19 @@ def _collect_single_target(args):
                                              revision=args.encoder_revision, device=args.device)
     except RuntimeError as exc:
         raise ValueError(str(exc)) from exc
-    return collect_single_target(manifest, bank=bank, role=args.role, validation_role=args.validation_role, spec=spec,
+    return collector(manifest, bank=bank, role=args.role, validation_role=args.validation_role, spec=spec,
         env_factory=_env_factory(raw, manifest), actor_factory=lambda: _actor(raw),
         output_dir=args.output, encoder=encoder, hazard=hazard, exposure_rules=exposure_rules,
         assignment_probability=args.assignment_probability)
+
+
+def _collect_auto_target(args):
+    return _collect_single_target(args)
+
+
+def _summarize_target_auto(args):
+    from cave_mem_v3.interventions.auto import summarize_target_auto
+    return summarize_target_auto(args.run)
 
 
 def _summarize_target_single(args):
@@ -760,6 +773,7 @@ def main(argv=None):
     p.add_argument("--paired", nargs=2, action="append", default=[], metavar=("RUN", "PREPARED"),
                    help="paired run directory and its original prepared directory; repeat for additional runs")
     p.add_argument("--single", action="append", default=[], help="single-arm run directory; may be repeated")
+    p.add_argument("--auto", action="append", default=[], help="automatic paired-or-single run directory; may be repeated")
     p.add_argument("--output", required=True)
     p = sub.add_parser("check", help="check pending configuration, without model/network access")
     p.add_argument("--config", required=True)
@@ -811,6 +825,18 @@ def main(argv=None):
     p.add_argument("--high-risk-probability", type=float, default=.75)
     p = sub.add_parser("summarize-target-single", help="verify observed single-arm results without execution or counterfactual labels")
     p.add_argument("--run", required=True)
+    p = sub.add_parser("collect-auto-target", help="audit each live selected checkpoint; pair when restorable, otherwise randomize one live arm")
+    for key in ("config", "manifest", "bank", "output", "encoder-path", "encoder-revision"):
+        p.add_argument("--" + key, required=True)
+    p.add_argument("--role", default="target_train", help="target_train or validation; validation also requires --validation-role")
+    p.add_argument("--validation-role", choices=("calibration", "selection"))
+    p.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    p.add_argument("--exposure-rules", help="optional frozen action-exposure rules; absent rules preserve e=?")
+    p.add_argument("--assignment-probability", type=float, required=True)
+    p.add_argument("--low-risk-probability", type=float, default=.05)
+    p.add_argument("--high-risk-probability", type=float, default=.75)
+    p = sub.add_parser("summarize-target-auto", help="recompute paired and randomized single-arm observations")
+    p.add_argument("--run", required=True)
     p = sub.add_parser("retrieve-target", help="retrieve one verified memory for each selected target checkpoint")
     p.add_argument("--target-run", required=True)
     p.add_argument("--bank", required=True)
@@ -845,6 +871,8 @@ def main(argv=None):
         if args.command == "pair-target" and result.get("pending_pairs"):
             return 2
         if args.command == "collect-single-target" and result.get("pending_rollouts"):
+            return 2
+        if args.command == "collect-auto-target" and result.get("pending"):
             return 2
         if args.command == "collect-policy-validation" and result.get("pending_tasks"):
             return 2

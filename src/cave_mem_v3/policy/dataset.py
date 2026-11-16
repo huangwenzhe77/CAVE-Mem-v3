@@ -84,11 +84,11 @@ def _served_identity(identities):
 
 
 def _descriptor(value):
-    if not isinstance(value, dict) or value.get("kind") not in ("paired", "single"):
-        raise ValueError("dataset source must declare paired or single kind")
+    if not isinstance(value, dict) or value.get("kind") not in ("paired", "single", "auto"):
+        raise ValueError("dataset source must declare paired, single, or auto kind")
     required = {"kind", "run"} | ({"prepared"} if value["kind"] == "paired" else set())
     if set(value) != required:
-        raise ValueError("paired sources require run and original prepared directories; single sources require run")
+        raise ValueError("paired sources require run and original prepared directories; single/auto sources require run")
     result = {"kind": value["kind"]}
     for name in required - {"kind"}:
         path = Path(value[name]).resolve(strict=True)
@@ -110,7 +110,7 @@ def _conditions(prepared, bank, kind):
               "risk_hazard": prepared["risk_hazard"]}
     protocol = {"kind": kind, "environment_configs": prepared["environment_configs"],
                 "environment_capabilities": prepared.get("environment_capabilities"),
-                "protocol": prepared.get("protocol") if kind == "single" else
+                 "protocol": prepared.get("protocol") if kind in ("single", "auto") else
                     "paired_restore_one_reminder_equal_continuation_budget.v1"}
     return shared, protocol
 
@@ -252,6 +252,58 @@ def _single(source, run):
     return run, summary, rows, identities
 
 
+def _auto(source, run):
+    from cave_mem_v3.interventions.auto import summarize_target_auto
+    summary = summarize_target_auto(source["run"])
+    if summary["pending"]:
+        raise ValueError("auto target collection is incomplete; preserve its denominator and finish/reconcile it first")
+    root = Path(source["run"])
+    tasks = {task["task_id"]: task for task in run["manifest"]["tasks"]}
+    memories = {m.memory_id: m for m in bank_memories(run["bank"])} if run["bank"]["memories"] else {}
+    rows, identities = [], []
+    for index, entry in enumerate(summary["observations"]):
+        task_id = run["task_order"][index]
+        observation = entry["observation"]
+        trace_id = digest([run["record_hash"], task_id])[:24]
+        directory = root / "sessions" / f"{index:06d}-{trace_id}"
+        item = read_json(directory / "input.json")
+        state = item.get("pre_treatment_state")
+        if (directory / "preparation.json").exists():
+            identities.extend(_response_identities(read_json(directory / "preparation.json")))
+        if entry["kind"] == "paired":
+            pair_dir = root / "pairs" / read_json(directory / "route.json")["pair_input_hash"]
+            pair_item = read_json(pair_dir / "input.json")
+            costs = {"shared": observation.get("shared_preparation_costs"),
+                     "shared_status": "validated", "arms": observation.get("arm_costs", {}),
+                     "deployment": observation.get("deployment_costs", {}),
+                     "pending": observation.get("pending_attempts", {}),
+                     "operational": observation.get("operational_costs")}
+            arms = costs["arms"]
+            costs["delta"] = ({key: arms["remind"][key] - arms["silent"][key]
+                if arms["remind"][key] is not None and arms["silent"][key] is not None else None
+                for key in arms["silent"]} if set(arms) == {"silent", "remind"} else {})
+            for arm in ("silent", "remind"):
+                path = pair_dir / arm / "result.json"
+                if path.exists():
+                    identities.extend(_response_identities(read_json(path)))
+            kind, checkpoint = "paired", pair_item["checkpoint_hash"]
+        else:
+            costs = {"shared": observation["shared_preparation_costs"],
+                     "arm": observation["arm_costs"], "observed": observation["observed_costs"],
+                     "operational": observation.get("operational_costs")}
+            path = directory / "result.json"
+            if path.exists():
+                identities.extend(_response_identities(read_json(path)))
+            kind, checkpoint = "single", item.get("public_point_hash")
+        rows.append(_row(run, run, tasks[task_id], trace_id, kind=kind,
+            input_hash=item["record_hash"], state=state,
+            memory=memories.get(state.get("memory_id")) if state else None,
+            observation=observation, inclusion=observation.get("inclusion_probability")
+                if kind == "single" else item["selection"].get("inclusion_probability"),
+            checkpoint=checkpoint, costs=costs))
+    return run, summary, rows, identities
+
+
 def _group_rows(rows, manifest):
     tasks = {task["task_id"]: task for task in manifest["tasks"]}
     target_components = _components(manifest["tasks"])
@@ -297,7 +349,8 @@ def build_policy_dataset(sources, *, role="target_train", validation_role=None):
     all_identities, software_only, route_protocols = [], False, {}
     for source in descriptors:
         run = checked(read_json(Path(source["run"]) / "run.json"),
-                      schema="target-pair-run.v1" if source["kind"] == "paired" else "target-single-run.v1")
+                      schema={"paired": "target-pair-run.v1", "single": "target-single-run.v1",
+                              "auto": "target-auto-run.v1"}[source["kind"]])
         prepared = run["prepared_run"] if source["kind"] == "paired" else run
         # Reject the role before any outcome-event reads, including a malicious
         # but consistently rehashed run that claims to be test/validation data.
@@ -319,7 +372,8 @@ def build_policy_dataset(sources, *, role="target_train", validation_role=None):
             fixed, manifest = conditions, prepared["manifest"]
         elif conditions != fixed:
             raise ValueError("incompatible manifest, bank, actor, encoder, study, sampling or exposure conditions")
-        prepared, summary, new_rows, identities = (_paired if source["kind"] == "paired" else _single)(source, run)
+        prepared, summary, new_rows, identities = {
+            "paired": _paired, "single": _single, "auto": _auto}[source["kind"]](source, run)
         all_identities.extend(identities)
         _served_identity(all_identities)
         software_only = software_only or prepared["manifest"]["benchmark"] == "preparation-fixture" or _fixture(conditions) or _fixture(protocol)

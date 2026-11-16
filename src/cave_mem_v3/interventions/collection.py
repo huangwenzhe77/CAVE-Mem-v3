@@ -119,6 +119,74 @@ def _journal(directory, plan, arm):
     return emit
 
 
+def execute_audited_pair(run, item, audit, memory, *, directory, env_factory,
+                         actor_factory, used):
+    """Execute both arms only after a persisted, passing restoration audit.
+
+    Return False when an external request is pending; the caller must stop the
+    whole collection without starting another arm or retrying that request.
+    """
+    if audit["status"] != "passed":
+        raise ValueError("paired execution requires a passed restoration audit")
+    reminder = render_reminder(memory, item["a0"])
+    plan = pair_plan(run, item, audit, reminder)
+    _exclusive_json(directory / "plan.json", plan)
+    reference = copy.deepcopy(item["response_identity"])
+    pair_status = "completed"
+    for arm in plan["order"]:
+        arm_dir = directory / arm
+        _exclusive_json(arm_dir / "attempt.json", seal({"plan_hash": plan["record_hash"], "arm": arm, "status": "started"}))
+        actor = env = None
+        result = pending = None
+        cleanup_errors = []
+        try:
+            actor = actor_factory()
+            if any(actor is old for old in used):
+                raise ValueError("factory reused an actor across arms")
+            used.append(actor)
+            env = env_factory(copy.deepcopy(item["task"]))
+            if any(env is old for old in used):
+                raise ValueError("factory reused an environment across arms")
+            used.append(env)
+            _check_instance(item, env, actor)
+        except Exception as exc:
+            result = {"status": "setup_error", "error": {"type": type(exc).__name__, "message": str(exc)}}
+        try:
+            if result is None:
+                result = run_target_arm(env, actor, context=_context(item["context"]),
+                    checkpoint=item["checkpoint"], first_action=item["a0"], arm=arm,
+                    reminder=reminder["text"] if arm == "remind" else None,
+                    spec=StudySpec(**run["study"]), seed=plan["seed"],
+                    remaining_model_calls=item["remaining_model_calls"], remaining_steps=item["remaining_steps"],
+                    expected_response_identity=reference, journal=_journal(arm_dir / "events", plan, arm))
+        except TargetPendingError as exc:
+            pending = seal({"plan_hash": plan["record_hash"], "arm": arm, "status": "pending",
+                            "partial_record": exc.partial_record, "attempt": exc.attempt})
+        finally:
+            for instance in (env, actor):
+                if instance is not None:
+                    try:
+                        _close(instance)
+                    except Exception as exc:
+                        cleanup_errors.append(type(exc).__name__)
+        if pending is not None:
+            _exclusive_json(arm_dir / "pending.json", seal({**pending, "cleanup_errors": cleanup_errors}))
+            return False
+        _exclusive_json(arm_dir / "result.json", seal({"schema_version": "target-arm-result.v1",
+            "plan_hash": plan["record_hash"], "arm": arm, "record": result, "cleanup_errors": cleanup_errors}))
+        if (cleanup_errors or result["status"] == "setup_error"
+                or (result.get("error") or {}).get("scope") == "pair_shared"):
+            pair_status = "blocked"
+            break
+        identity = result.get("response_identity", {})
+        for key in ("model", "fingerprint"):
+            if identity.get(key) is not None:
+                reference[key] = identity[key]
+    _exclusive_json(directory / "closed.json", seal({"input_hash": item["record_hash"],
+        "plan_hash": plan["record_hash"], "status": pair_status}))
+    return True
+
+
 def collect_target_pairs(target_dir, bank, *, env_factory, actor_factory, output_dir):
     """Run a frozen paired pilot; completed records resume without model calls.
 
@@ -160,66 +228,11 @@ def collect_target_pairs(target_dir, bank, *, env_factory, actor_factory, output
             _exclusive_json(directory / "closed.json", seal({"input_hash": item["record_hash"],
                 "status": "blocked", "reason": "restoration_audit_failed", "audit_hash": audit["record_hash"]}))
             continue
-        reminder = render_reminder(memories[item["memory_id"]], item["a0"])
-        plan = pair_plan(run, item, audit, reminder)
-        _exclusive_json(directory / "plan.json", plan)
-        reference = copy.deepcopy(item["response_identity"])
-        pair_status = "completed"
-        for arm in plan["order"]:
-            arm_dir = directory / arm
-            _exclusive_json(arm_dir / "attempt.json", seal({"plan_hash": plan["record_hash"], "arm": arm, "status": "started"}))
-            actor = env = None
-            result = pending = None
-            cleanup_errors = []
-            try:
-                actor = actor_factory()
-                if any(actor is old for old in used):
-                    raise ValueError("factory reused an actor across arms")
-                used.append(actor)
-                env = env_factory(copy.deepcopy(item["task"]))
-                if any(env is old for old in used):
-                    raise ValueError("factory reused an environment across arms")
-                used.append(env)
-                _check_instance(item, env, actor)
-            except Exception as exc:
-                result = {"status": "setup_error", "error": {"type": type(exc).__name__, "message": str(exc)}}
-            try:
-                if result is None:
-                    result = run_target_arm(env, actor, context=_context(item["context"]),
-                        checkpoint=item["checkpoint"], first_action=item["a0"], arm=arm,
-                        reminder=reminder["text"] if arm == "remind" else None,
-                        spec=StudySpec(**run["study"]), seed=plan["seed"],
-                        remaining_model_calls=item["remaining_model_calls"], remaining_steps=item["remaining_steps"],
-                        expected_response_identity=reference, journal=_journal(arm_dir / "events", plan, arm))
-            except TargetPendingError as exc:
-                pending = seal({"plan_hash": plan["record_hash"], "arm": arm, "status": "pending",
-                                "partial_record": exc.partial_record, "attempt": exc.attempt})
-            finally:
-                for instance in (env, actor):
-                    if instance is not None:
-                        try:
-                            _close(instance)
-                        except Exception as exc:
-                            cleanup_errors.append(type(exc).__name__)
-            if pending is not None:
-                pending = seal({**pending, "cleanup_errors": cleanup_errors})
-                _exclusive_json(arm_dir / "pending.json", pending)
-                summary = summarize_target_pairs(root)
-                write_json(root / "summary.json", summary)
-                return summary  # Never start the other arm after uncertainty.
-            wrapper = seal({"schema_version": "target-arm-result.v1", "plan_hash": plan["record_hash"],
-                            "arm": arm, "record": result, "cleanup_errors": cleanup_errors})
-            _exclusive_json(arm_dir / "result.json", wrapper)
-            if (cleanup_errors or result["status"] == "setup_error"
-                    or (result.get("error") or {}).get("scope") == "pair_shared"):
-                pair_status = "blocked"
-                break
-            identity = result.get("response_identity", {})
-            for key in ("model", "fingerprint"):
-                if identity.get(key) is not None:
-                    reference[key] = identity[key]
-        _exclusive_json(directory / "closed.json", seal({"input_hash": item["record_hash"],
-            "plan_hash": plan["record_hash"], "status": pair_status}))
+        if not execute_audited_pair(run, item, audit, memories[item["memory_id"]],
+                directory=directory, env_factory=env_factory, actor_factory=actor_factory, used=used):
+            summary = summarize_target_pairs(root)
+            write_json(root / "summary.json", summary)
+            return summary
     summary = summarize_target_pairs(root)
     write_json(root / "summary.json", summary)
     return summary

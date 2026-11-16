@@ -6,6 +6,8 @@
 
 在独立虚拟环境中安装 `python -m pip install -e ".[policy]"`。此 extra 使用 NumPy；第一、二部分的基础命令无需此依赖。训练数据必须通过 `build-policy-dataset` 从原始日志重核；配对原始 prepared 目录与任务资产仍需保留。训练、validation/calibration、validation/selection 分别导出，不能临时按行随机拆分。
 
+自动分流采集目录使用 `cave3 build-policy-dataset --auto <run-dir> --output <new-dataset.json>` 导出。每行仍标记 `paired` 或 `single`：前者可有真实配对 `D/H`，后者只含随机分配的一臂及其 propensity；未完成会话不能进入训练数据。
+
 ## 配对监督与校准
 
 `train-policy` 只接受 target_train。冻结文本向量与明确的结构化字段构成轻量输入：v/ρ/e 使用三值编码，e 置信度使用分类编码，连续值附未知标记。当前已记录文本向量表示公开上下文和 a0，记忆通过 E、ρ/e、检索与距离字段进入；没有额外编码原始记忆全文。任务 ID、来源 ID、分配概率、目标成本与结局不进入特征。归一化只由训练数据计算。
