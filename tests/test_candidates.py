@@ -127,6 +127,8 @@ class CandidateTests(unittest.TestCase):
             step = copy.deepcopy(original)
             step["index"] = index
             step["context"]["observation"] = f"public checkpoint {index}"
+            if index == 5:
+                step["result"]["context"]["observation"] = f"public checkpoint {index}"
             trace["episode"]["steps"].append(step)
         trace["trace_hash"] = digest({key: value for key, value in trace.items() if key != "trace_hash"})
         self.assertEqual(len(eligible_source_steps(trace)), 15)
@@ -146,11 +148,14 @@ class CandidateTests(unittest.TestCase):
                 payload = json.loads(messages[1]["content"])
                 visible = payload["eligible_step_indices"]
                 self_test.assertIn(7, visible)
+                self_test.assertIn(5, visible)
                 self_test.assertLessEqual(len(visible), 7)
                 failed = payload["failed"]
                 self_test.assertEqual(len(failed["steps"]) + len(failed["omitted_action_path"]), 15)
                 self_test.assertEqual(failed["expanded_step_selection"],
-                                      "first_two_last_two_and_eligible_quartiles.v1")
+                                      "boundary_midpoint_and_public_failure_cues.v1")
+                self_test.assertIn("no_observable_progress", next(step for step in failed["steps"]
+                    if step["step_index"] == 5)["failure_cues"])
                 return SimpleNamespace(text=json.dumps({"candidates": [proposal]}), model="test-model",
                                        usage={"model_calls": 1}, attempt={"status": "completed"})
 

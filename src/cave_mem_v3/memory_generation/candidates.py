@@ -50,17 +50,41 @@ def _decode_candidate_json(text: str) -> dict:
 def _teacher_source_view(trace: dict, eligible: list[int]) -> dict:
     """Expand representative eligible checkpoints and retain every public action."""
     episode = public_source_episode(trace)
+    cues: dict[int, list[str]] = {}
+    seen_actions: set[tuple[str, str]] = set()
+    for step in episode["steps"]:
+        signals = []
+        if step.get("action_valid") is False or step.get("validation_error"):
+            signals.append("invalid_action")
+        before, after = step.get("observation"), step.get("next_observation")
+        if isinstance(before, str) and before and before == after:
+            signals.append("no_observable_progress")
+        action = step.get("action")
+        if isinstance(action, dict):
+            key = (canonical(action), str(before))
+            if key in seen_actions:
+                signals.append("repeated_action_at_same_observation")
+            seen_actions.add(key)
+        cues[step["step_index"]] = signals
     if len(eligible) <= 7:
         keep = set(eligible)
         selection_rule = "all_eligible.v1"
     else:
-        # Long trajectories often fail in the middle. Keep the boundary steps
-        # and three evenly spaced eligible checkpoints without a second model
-        # request or a post hoc choice among multiple proposals.
+        # Source-only symptoms guide which middle steps receive full context.
+        # They are screening cues, not proof that the action caused failure.
         keep = set(eligible[:2] + eligible[-2:])
-        keep.update(eligible[round((len(eligible) - 1) * fraction)]
-                    for fraction in (0.25, 0.5, 0.75))
-        selection_rule = "first_two_last_two_and_eligible_quartiles.v1"
+        keep.add(eligible[round((len(eligible) - 1) * 0.5)])
+        scored = sorted((index for index in eligible if index not in keep and cues[index]),
+                        key=lambda index: (-sum({"invalid_action": 3,
+                                                 "no_observable_progress": 2,
+                                                 "repeated_action_at_same_observation": 1}[cue]
+                                                for cue in cues[index]), index))
+        keep.update(scored[:2])
+        for fraction in (0.25, 0.75):
+            if len(keep) >= 7:
+                break
+            keep.add(eligible[round((len(eligible) - 1) * fraction)])
+        selection_rule = "boundary_midpoint_and_public_failure_cues.v1"
     steps = []
     omitted_path = []
     for step in episode["steps"]:
@@ -71,6 +95,8 @@ def _teacher_source_view(trace: dict, eligible: list[int]) -> dict:
                                  "action_valid": step.get("action_valid")})
             continue
         item = copy.deepcopy(step)
+        if cues[step["step_index"]]:
+            item["failure_cues"] = cues[step["step_index"]]
         for key in ("observation", "next_observation"):
             if isinstance(item.get(key), str) and len(item[key]) > 1000:
                 item[key] = item[key][:1000] + "..."
@@ -303,10 +329,14 @@ def generate_candidates(trace: dict, provider: Any, *, successful_traces: Iterab
         "For text games, copy the replacement command exactly from that step's public admissible actions; "
         "for shell tasks, directly create or repair the artifact. Do not use a placeholder or multi-step plan. "
         "Prefer a checkpoint where one replacement action can complete the remaining task within the recorded budget. "
+        "The listed failure_cues are public screening hints, not causal proof; compare the failed path with "
+        "same-task successful trajectories when available before choosing one repair. "
         "Keep the mechanism, scope, and failure signature concise. "
         "Write positive and exclusion conditions for the transferable failure mechanism, not for the exact source scene. "
         "Text-game object identifiers and coordinates (for example bar__plus_01_dot_28) must never appear in condition regexes; "
-        "use stable object classes, task instruction wording, or observable action patterns instead. "
+        "use stable task-family wording or observable action patterns instead. A regex that repeats the entire "
+        "source instruction with its object and destination names is too narrow; abstract those names when the "
+        "failure mechanism does not depend on them, while keeping any necessary preconditions. "
         "The source correction command must still be copied exactly from its source checkpoint's admissible actions. "
         "Do not make an exclusion condition that merely negates a source-scene identifier. "
         "Every positive condition must already be true in the chosen step's instruction, observation, public history, "
