@@ -272,15 +272,24 @@ def _actor(raw):
             raise ValueError("scripted actor is restricted to software fixtures")
         return ScriptedActor(**config)
     prompt = config.pop("system_prompt", None)
+    max_history_chars = config.pop("max_history_chars", None)
     raw_with_actor = copy.deepcopy(raw)
     raw_with_actor["actor"] = {"kind": kind, **config}
     provider = _provider(raw_with_actor, "actor")
     if prompt is None:
-        prompt = ('Solve the task using the visible observations and executed history. '
+        if raw["environment"]["kind"] == "alfworld":
+            prompt = ('Solve the household task using only visible observations and executed history. '
+                      'Plan the shortest route internally before choosing the next action. '
+                      'Prefer actions that directly advance the task; do not repeat look/examine or revisit a location unless the latest observation requires it. '
+                      'Choose exactly one command from the current Admissible actions list. '
+                      'Return exactly one JSON action: {"type":"text","command":"the exact listed command"}. '
+                      'No markdown or explanation.')
+        else:
+            prompt = ('Solve the task using the visible observations and executed history. '
                   'Return exactly one JSON action: {"type":"shell","command":"..."} '
                   'or {"type":"finish"} when complete. Each shell command starts a fresh '
                   'process; filesystem changes persist. No markdown or explanation.')
-    return ProviderActor(provider, system_prompt=prompt)
+    return ProviderActor(provider, system_prompt=prompt, max_history_chars=max_history_chars)
 
 
 def _teacher(raw):
@@ -298,6 +307,11 @@ def _env_factory(raw, manifest):
             raise ValueError("fixture environment requires the explicit fixture benchmark")
         return lambda task: PreparationEnvironment(task_id=task["task_id"],
             max_steps=raw["study"].get("max_steps", 30), **task.get("environment", {}))
+    if kind == "alfworld":
+        if manifest["benchmark"] != "alfworld-text@0.5.0":
+            raise ValueError("ALFWorld environment requires alfworld-text@0.5.0")
+        from cave_mem_v3.environments.alfworld import ALFWorldEnvironment
+        return lambda task: ALFWorldEnvironment(task, max_steps=raw["study"].get("max_steps", 30))
     if manifest["benchmark"] != "terminal-bench@2.0":
         raise ValueError("terminal environment requires terminal-bench@2.0")
     revision = manifest["revision"]
@@ -406,7 +420,8 @@ def _collect_target(args):
     spec = StudySpec(**raw["study"])
     _actor(raw)
     hazard = RiskHazard(low_risk_probability=args.low_risk_probability,
-                        high_risk_probability=args.high_risk_probability)
+                        high_risk_probability=args.high_risk_probability,
+                        risk_rubric=args.risk_rubric)
     return collect_target(manifest, role=args.role, validation_role=args.validation_role, spec=spec,
                           env_factory=_env_factory(raw, manifest),
                           actor_factory=lambda: _actor(raw),
@@ -443,7 +458,8 @@ def _prepare_target(args):
     validate_exposure_rules(exposure_rules)
     _actor(raw)
     hazard = RiskHazard(low_risk_probability=args.low_risk_probability,
-                        high_risk_probability=args.high_risk_probability)
+                        high_risk_probability=args.high_risk_probability,
+                        risk_rubric=args.risk_rubric)
     return collect_target(
         manifest, role=args.role, validation_role=args.validation_role, spec=spec,
         env_factory=_env_factory(raw, manifest), actor_factory=lambda: _actor(raw),
@@ -500,7 +516,8 @@ def _collect_single_target(args):
     partition_tasks(manifest, args.role, args.validation_role)
     spec = StudySpec(**raw["study"])
     hazard = RiskHazard(low_risk_probability=args.low_risk_probability,
-                        high_risk_probability=args.high_risk_probability)
+                        high_risk_probability=args.high_risk_probability,
+                        risk_rubric=args.risk_rubric)
     bank = read_json(args.bank)
     exposure_rules = read_json(args.exposure_rules) if args.exposure_rules else None
     validate_exposure_rules(exposure_rules)
@@ -858,6 +875,8 @@ def main(argv=None):
     p.add_argument("--validation-role", choices=("calibration", "selection"))
     p.add_argument("--low-risk-probability", type=float, default=0.05)
     p.add_argument("--high-risk-probability", type=float, default=0.75)
+    p.add_argument("--risk-rubric", choices=("public-pre-action-risk-cues.v1", "public-pre-action-risk-cues.v2"),
+                   default="public-pre-action-risk-cues.v1")
     p = sub.add_parser("prepare-target", help="freeze pre-treatment state at the selected checkpoint before executing a0")
     p.add_argument("--config", required=True)
     p.add_argument("--manifest", required=True)
@@ -873,6 +892,8 @@ def main(argv=None):
                    help="optional versioned per-memory action-exposure rules JSON; absent rules yield e=?")
     p.add_argument("--low-risk-probability", type=float, default=0.05)
     p.add_argument("--high-risk-probability", type=float, default=0.75)
+    p.add_argument("--risk-rubric", choices=("public-pre-action-risk-cues.v1", "public-pre-action-risk-cues.v2"),
+                   default="public-pre-action-risk-cues.v1")
     p = sub.add_parser("pair-target", help="audit prepared target checkpoints and run independent Silent/Remind arms")
     for key in ("config", "target-run", "bank", "output"):
         p.add_argument("--" + key, required=True)
@@ -889,6 +910,8 @@ def main(argv=None):
                    help="frozen probability of Remind; strictly between zero and one")
     p.add_argument("--low-risk-probability", type=float, default=.05)
     p.add_argument("--high-risk-probability", type=float, default=.75)
+    p.add_argument("--risk-rubric", choices=("public-pre-action-risk-cues.v1", "public-pre-action-risk-cues.v2"),
+                   default="public-pre-action-risk-cues.v1")
     p = sub.add_parser("summarize-target-single", help="verify observed single-arm results without execution or counterfactual labels")
     p.add_argument("--run", required=True)
     p = sub.add_parser("collect-auto-target", help="audit each live selected checkpoint; pair when restorable, otherwise randomize one live arm")
@@ -901,6 +924,8 @@ def main(argv=None):
     p.add_argument("--assignment-probability", type=float, required=True)
     p.add_argument("--low-risk-probability", type=float, default=.05)
     p.add_argument("--high-risk-probability", type=float, default=.75)
+    p.add_argument("--risk-rubric", choices=("public-pre-action-risk-cues.v1", "public-pre-action-risk-cues.v2"),
+                   default="public-pre-action-risk-cues.v1")
     p = sub.add_parser("summarize-target-auto", help="recompute paired and randomized single-arm observations")
     p.add_argument("--run", required=True)
     p = sub.add_parser("judge-paired-exposure", help="assess original-action mechanism exposure after paired target execution")

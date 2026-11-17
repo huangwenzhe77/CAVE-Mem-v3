@@ -1,7 +1,7 @@
 import unittest
 
 from cave_mem_v3.common.contracts import PublicContext
-from cave_mem_v3.agents.providers import OpenAIConfig, OpenAICompatibleProvider, ProviderActor, ProviderError
+from cave_mem_v3.agents.providers import OpenAIConfig, OpenAICompatibleProvider, ProviderActor, ProviderError, render_messages
 from cave_mem_v3.environments.base import EnvStep, PreparationEnvironment
 from cave_mem_v3.agents.runtime import run_episode
 from cave_mem_v3.common.contracts import StudySpec
@@ -15,6 +15,36 @@ def response(text='{"type":"prepare"}', usage=None, *, model="Qwen/Qwen2.5-7B-In
 
 
 class ProviderTests(unittest.TestCase):
+    def test_bounded_history_keeps_recent_observation_and_records_cap(self):
+        history = tuple({"action": {"type": "text", "command": f"action-{index}"},
+                         "observation": f"seen-{index} " + "x" * 700}
+                        for index in range(12))
+        context = PublicContext(task_id="task", instruction="do task", observation="now",
+                                history=history)
+        bounded = render_messages(context, max_history_chars=1500)[-1]["content"]
+        self.assertIn("seen-11", bounded)
+        self.assertIn("omitted_early_actions", bounded)
+        self.assertNotIn("seen-0", bounded)
+        actor = ProviderActor(OpenAICompatibleProvider(OpenAIConfig()), max_history_chars=1500)
+        self.assertEqual(actor.configuration()["max_history_chars"], 1500)
+        self.assertNotIn("max_history_chars", ProviderActor(OpenAICompatibleProvider(OpenAIConfig())).configuration())
+
+    def test_explicit_thinking_mode_is_frozen_in_request(self):
+        requests = []
+        provider = OpenAICompatibleProvider(OpenAIConfig(revision="fixed", thinking_mode="disabled"),
+            transport=lambda payload: requests.append(payload) or response())
+        provider.generate([{"role": "user", "content": "choose one action"}], stage="source", seed=3)
+        self.assertEqual(requests[0]["thinking"], {"type": "disabled"})
+        with self.assertRaisesRegex(ValueError, "thinking_mode"):
+            OpenAIConfig(thinking_mode="unknown")
+        low_requests = []
+        low = OpenAICompatibleProvider(OpenAIConfig(revision="fixed", reasoning_effort="low"),
+            transport=lambda payload: low_requests.append(payload) or response())
+        low.generate([{"role": "user", "content": "choose one action"}], stage="source", seed=3)
+        self.assertEqual(low_requests[0]["reasoning_effort"], "low")
+        with self.assertRaisesRegex(ValueError, "only one"):
+            OpenAIConfig(thinking_mode="disabled", reasoning_effort="low")
+
     def test_length_response_is_charged_and_graded_without_executing_action(self):
         class GradedEnvironment(PreparationEnvironment):
             def __init__(self):

@@ -364,26 +364,20 @@ class SingleCollectionTests(unittest.TestCase):
             self.assertEqual((item["status"], item["reason"]), ("excluded", "no_selection"))
             self.assertFalse((session / "assignment.json").exists())
 
-    def test_invalid_frozen_risk_rubric_preserves_summarizable_blocked_session(self):
+    def test_invalid_frozen_risk_rubric_is_rejected_before_collection(self):
         class NeverCall(ScriptedActor):
             def propose(self, *args, **kwargs):
-                raise AssertionError("sampling failure invoked actor")
+                raise AssertionError("invalid configuration invoked actor")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             fixture = self.fixture(root)
-            summary = collect_single_target(fixture["manifest"], bank=fixture["bank"],
-                spec=StudySpec(max_steps=4, max_model_calls=4), encoder=EncoderFixture(),
-                env_factory=lambda task: NoncloneableFixture(task_id=task["task_id"]),
-                actor_factory=NeverCall, output_dir=root / "single", assignment_probability=.5,
-                hazard=RiskHazard(risk_rubric="unsupported-frozen-rubric"))
-            self.assertEqual(summary["blocked_rollouts"], 1)
-            self.assertEqual(summary["valid_outcomes"], 0)
-            self.assertEqual(summary, summarize_target_single(root / "single"))
-            session = next((root / "single" / "sessions").iterdir())
-            self.assertFalse((session / "assignment.json").exists())
-            preparation = read_json(session / "preparation.json")
-            self.assertEqual(preparation["selection"]["status"], "sampling_incomplete")
-            self.assertEqual(preparation["costs"]["model_calls"], 0)
+            with self.assertRaisesRegex(ValueError, "unsupported public checkpoint risk rubric"):
+                collect_single_target(fixture["manifest"], bank=fixture["bank"],
+                    spec=StudySpec(max_steps=4, max_model_calls=4), encoder=EncoderFixture(),
+                    env_factory=lambda task: NoncloneableFixture(task_id=task["task_id"]),
+                    actor_factory=NeverCall, output_dir=root / "single", assignment_probability=.5,
+                    hazard=RiskHazard(risk_rubric="unsupported-frozen-rubric"))
+            self.assertFalse((root / "single").exists())
 
 
 if __name__ == "__main__":

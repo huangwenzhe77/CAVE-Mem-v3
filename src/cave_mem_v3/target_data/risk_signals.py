@@ -79,8 +79,9 @@ def _prior_tool_failure(prior_steps: list[dict]) -> bool:
     return False
 
 
-def risk_features(context: dict, prior_steps: list[dict]) -> dict:
-    """Return three binary public risk cues and their integer sum.
+def risk_features(context: dict, prior_steps: list[dict], *,
+                  rubric: str = "public-pre-action-risk-cues.v1") -> dict:
+    """Return frozen public cues and their preregistered integer score.
 
     ``context`` is the public context immediately before the candidate action.
     ``prior_steps`` must contain only steps strictly before that checkpoint.
@@ -103,5 +104,18 @@ def risk_features(context: dict, prior_steps: list[dict]) -> dict:
         "prior_tool_failure": _prior_tool_failure(prior_steps),
         "repeated_prior_action": repeated_prior_action,
     }
-    return {**cues, "risk_score": sum(cues.values()), "risk_score_max": 3,
-            "risk_rubric": "public-pre-action-risk-cues.v1"}
+    if rubric == "public-pre-action-risk-cues.v1":
+        return {**cues, "risk_score": sum(cues.values()), "risk_score_max": 3,
+                "risk_rubric": rubric}
+    if rubric != "public-pre-action-risk-cues.v2":
+        raise ValueError("unsupported public checkpoint risk rubric")
+    actions = context.get("admissible_actions", ())
+    if not isinstance(actions, (list, tuple)) or any(not isinstance(a, str) for a in actions):
+        raise TypeError("public admissible actions must be a text sequence")
+    interaction = (isinstance(context.get("facts"), dict)
+                   and context["facts"].get("benchmark") == "alfworld-text"
+                   and any(re.match(r"^(?:take|put|use|heat|cool|clean|slice|move)\s", a, re.I)
+                           for a in actions))
+    return {**cues, "object_interaction_available": bool(interaction),
+            "risk_score": sum(cues.values()) + 3 * int(bool(interaction)),
+            "risk_score_max": 6, "risk_rubric": rubric}

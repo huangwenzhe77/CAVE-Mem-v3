@@ -102,6 +102,8 @@ def scored_source_outcome(episode: dict) -> bool | None:
         return success if status == "terminal" and isinstance(verifier, dict) and verifier.get("success") is success else None
     if adapter == "preparation-fixture.v3" and status == "terminal":
         return success
+    if adapter == "alfworld-text-prefix-replay.v1" and status == "terminal":
+        return success
     return None
 
 
@@ -180,6 +182,14 @@ def _summary(run, traces, config, task_ids, planned_runs, nominal_runs):
     if len(traces) >= config.max_runs:
         limits_reached.append("max_runs")
     attempts = Counter(trace["task_id"] for trace in traces)
+    per_task_outcomes = {task_id: {"success": 0, "failure": 0, "unscored": 0, "error": 0}
+                         for task_id in task_ids}
+    for trace in traces:
+        episode = trace["episode"]
+        outcome = scored_source_outcome(episode)
+        bucket = ("success" if outcome is True else "failure" if outcome is False else
+                  "error" if episode["status"] == "error" else "unscored")
+        per_task_outcomes[trace["task_id"]][bucket] += 1
     measured = {trace["task_id"] for trace in traces if scored_source_outcome(trace["episode"]) is not None}
     failure_tasks = {trace["task_id"] for trace in traces if scored_source_outcome(trace["episode"]) is False}
     result = {"schema_version": "history-summary.v3", "run_hash": run["run_hash"],
@@ -197,6 +207,7 @@ def _summary(run, traces, config, task_ids, planned_runs, nominal_runs):
               "attempt_coverage": len(attempts) / len(task_ids),
               "valid_outcome_coverage": len(measured) / len(task_ids),
               "per_task_attempts": {task_id: attempts[task_id] for task_id in task_ids},
+              "per_task_outcomes": per_task_outcomes,
               "trace_ids": [trace["trace_id"] for trace in traces],
               "selection_note": ("Outcome-dependent stopping; exploratory corpus, not an unbiased failure-rate cohort."
                                  if config.mode == "failure_target" else "Fixed outcome-blind task/replicate schedule; infrastructure failures retained."),

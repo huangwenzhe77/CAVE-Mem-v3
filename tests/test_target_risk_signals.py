@@ -4,6 +4,16 @@ from cave_mem_v3.target_data.risk_signals import risk_features
 
 
 class TargetRiskSignalTests(unittest.TestCase):
+    def test_v2_prioritizes_public_alfworld_interaction_without_action_or_outcome(self):
+        context = {"observation": "An apple is on the desk.",
+                   "facts": {"benchmark": "alfworld-text"},
+                   "admissible_actions": ["go to shelf", "take apple_bar__01 from desk_bar__02"]}
+        features = risk_features(context, [], rubric="public-pre-action-risk-cues.v2")
+        self.assertTrue(features["object_interaction_available"])
+        self.assertEqual((features["risk_score"], features["risk_score_max"]), (3, 6))
+        self.assertEqual(risk_features({**context, "admissible_actions": ["go to shelf"]}, [],
+                                       rubric="public-pre-action-risk-cues.v2")["risk_score"], 0)
+
     def test_empty_checkpoint_has_zero_risk(self):
         features = risk_features({"observation": "The workspace is ready."}, [])
         self.assertEqual(features["risk_score"], 0)

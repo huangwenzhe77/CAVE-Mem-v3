@@ -9,9 +9,82 @@ import copy
 import json
 from typing import Any, Iterable
 
-from cave_mem_v3.common.contracts import canonical, digest, plain
+from cave_mem_v3.common.contracts import PublicContext, canonical, digest, plain
 from cave_mem_v3.memory_generation.collection import scored_source_outcome
-from cave_mem_v3.memory_generation.predicates import validate_predicate
+from cave_mem_v3.memory_generation.predicates import evaluate_conditions, validate_predicate
+
+
+def _decode_candidate_json(text: str) -> dict:
+    """Decode a complete teacher JSON object despite harmless wrapper text."""
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("teacher returned empty candidate output")
+    value = text.strip()
+    if value.startswith("```"):
+        lines = value.splitlines()
+        if lines and lines[0].lstrip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        value = "\n".join(lines).strip()
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        decoder = json.JSONDecoder()
+        starts = [index for index, char in enumerate(value) if char == "{"]
+        decoded = None
+        for start in starts:
+            try:
+                candidate, end = decoder.raw_decode(value[start:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict) and not value[start + end:].strip():
+                decoded = candidate
+                break
+        if decoded is None:
+            raise ValueError("teacher output is not one complete JSON object")
+    if not isinstance(decoded, dict):
+        raise ValueError("teacher output must be a JSON object")
+    return decoded
+
+
+def _teacher_source_view(trace: dict, eligible: list[int]) -> dict:
+    """Expand representative eligible checkpoints and retain every public action."""
+    episode = public_source_episode(trace)
+    if len(eligible) <= 7:
+        keep = set(eligible)
+        selection_rule = "all_eligible.v1"
+    else:
+        # Long trajectories often fail in the middle. Keep the boundary steps
+        # and three evenly spaced eligible checkpoints without a second model
+        # request or a post hoc choice among multiple proposals.
+        keep = set(eligible[:2] + eligible[-2:])
+        keep.update(eligible[round((len(eligible) - 1) * fraction)]
+                    for fraction in (0.25, 0.5, 0.75))
+        selection_rule = "first_two_last_two_and_eligible_quartiles.v1"
+    steps = []
+    omitted_path = []
+    for step in episode["steps"]:
+        if step["step_index"] not in keep:
+            omitted_path.append({"step_index": step["step_index"],
+                                 "action": copy.deepcopy(step.get("action")),
+                                 "observation": str(step.get("next_observation", ""))[:80],
+                                 "action_valid": step.get("action_valid")})
+            continue
+        item = copy.deepcopy(step)
+        for key in ("observation", "next_observation"):
+            if isinstance(item.get(key), str) and len(item[key]) > 1000:
+                item[key] = item[key][:1000] + "..."
+        actions = item.get("admissible_actions")
+        if isinstance(actions, list) and len(actions) > 30:
+            item["admissible_actions"] = actions[:30]
+            item["admissible_actions_truncated"] = True
+        steps.append(item)
+    return {"task_id": episode["task_id"], "success": episode["success"],
+            "status": episode["status"], "termination_reason": episode["termination_reason"],
+            "actor_behavior": episode["actor_behavior"], "steps": steps,
+            "expanded_step_selection": selection_rule,
+            "omitted_step_count": len(episode["steps"]) - len(steps),
+            "omitted_action_path": omitted_path}
 
 
 class CandidateGenerationError(ValueError):
@@ -47,12 +120,18 @@ def _failed_step(trace: dict, step_index: int) -> dict:
     step = episode["steps"][step_index]
     if step.get("index") != step_index or not isinstance(step.get("checkpoint"), dict):
         raise ValueError("source step has no aligned restorable checkpoint")
-    if (not isinstance(step.get("action"), dict) or not step["action"]
-            or step["action"].get("type") == "__unparsed_action__"
-            or step.get("validation_error") is not None
-            or not isinstance(step.get("result"), dict) or step["result"].get("valid") is not True
-            or (isinstance(step.get("actor_response"), dict)
-                and step["actor_response"].get("finish_reason") == "length")):
+    if not isinstance(step.get("result"), dict) and not step.get("validation_error"):
+        raise ValueError("source step has neither an observed result nor a recorded action error")
+    action = step.get("action")
+    # A typed action with a command remains useful evidence even when the
+    # environment rejected it (for example, an agent returned json_object
+    # where ALFWorld requires text). The correction route can normalize it;
+    # an unparsed response still has no recoverable action to repair.
+    if (not isinstance(action, dict) or not action
+            or action.get("type") == "__unparsed_action__"
+            or action.get("type") in ("text", "shell")
+            and (not isinstance(action.get("command"), str)
+                 or not action["command"].strip())):
         raise ValueError("source step has no executable original action")
     if step.get("context", {}).get("task_id") != trace["task_id"]:
         raise ValueError("source step task identity mismatch")
@@ -175,6 +254,7 @@ def public_source_episode(trace: dict) -> dict:
         steps.append({"step_index": index,
                       "instruction": context.get("instruction", ""),
                       "observation": context.get("observation", ""),
+                      "admissible_actions": context.get("admissible_actions", []),
                       "action": copy.deepcopy(step.get("action")),
                       "next_observation": next_context.get("observation", ""),
                       "action_valid": result.get("valid"),
@@ -204,9 +284,14 @@ def generate_candidates(trace: dict, provider: Any, *, successful_traces: Iterab
         reference_episode = checked_trace(reference)
         if reference["task_id"] != trace["task_id"] or scored_source_outcome(reference_episode) is not True:
             raise ValueError("successful references must be historical successes of the same task")
-        successes.append(public_source_episode(reference))
+        successes.append(_teacher_source_view(reference, list(range(len(reference_episode["steps"])))))
+    action_type = next((episode["steps"][i]["action"].get("type") for i in eligible_source_steps(trace)), "shell")
+    source_view = _teacher_source_view(trace, eligible_source_steps(trace))
+    visible_steps = [step["step_index"] for step in source_view["steps"]]
+    correction_example = ({"type": "text", "command": "one exact admissible command"}
+                          if action_type == "text" else {"type": "shell", "command": "executable repair"})
     schema = {"candidates": [{"step_index": 0, "mechanism": "falsifiable failure hypothesis",
-                              "correction": {"type": "shell", "command": "executable repair"},
+                              "correction": correction_example,
                               "positive_conditions": [{"source": "observation", "regex": "observed pattern"}],
                               "exclusion_conditions": [{"field": "prepared", "equals": True}],
                               "scope": "source validity boundary", "failure_signature": "observed failure"}]}
@@ -214,16 +299,25 @@ def generate_candidates(trace: dict, provider: Any, *, successful_traces: Iterab
         "Propose source-side repair hypotheses from the supplied historical observations. "
         "Do not claim verified causality or target transfer. Use only observed facts; do not invent hidden state. "
         "Choose a step only from eligible_step_indices and one executable action replacing that step. "
-        "The replacement action must directly create or repair the task artifact at that checkpoint; "
-        "do not propose an inspection-only command, a placeholder, or a multi-step plan. "
+        "The replacement must be one executable action of the same type as the recorded original. "
+        "For text games, copy the replacement command exactly from that step's public admissible actions; "
+        "for shell tasks, directly create or repair the artifact. Do not use a placeholder or multi-step plan. "
         "Prefer a checkpoint where one replacement action can complete the remaining task within the recorded budget. "
         "Keep the mechanism, scope, and failure signature concise. "
+        "Write positive and exclusion conditions for the transferable failure mechanism, not for the exact source scene. "
+        "Text-game object identifiers and coordinates (for example bar__plus_01_dot_28) must never appear in condition regexes; "
+        "use stable object classes, task instruction wording, or observable action patterns instead. "
+        "The source correction command must still be copied exactly from its source checkpoint's admissible actions. "
+        "Do not make an exclusion condition that merely negates a source-scene identifier. "
+        "Every positive condition must already be true in the chosen step's instruction, observation, public history, "
+        "or public facts; every exclusion condition must already be false there. Do not refer to observations "
+        "from later steps in any condition. "
         "Return JSON only, with no markdown. "
         "Conditions must be executable: a public fact field with exactly one equals/not_equals/in/exists operator, "
         "or source observation/instruction/history with a regex. Do not use private scorer/outcome fields. "
         f"Return exactly one candidate using this schema: {canonical(schema)}")},
-        {"role": "user", "content": canonical({"failed": public_source_episode(trace),
-                                                 "eligible_step_indices": eligible_source_steps(trace),
+        {"role": "user", "content": canonical({"failed": source_view,
+                                                 "eligible_step_indices": visible_steps,
                                                  "successes": successes})}]
     before = copy.deepcopy(provider.configuration())
     generation = {"status": "started", "error_type": None, "failure_stage": None,
@@ -242,7 +336,7 @@ def generate_candidates(trace: dict, provider: Any, *, successful_traces: Iterab
         if provider.configuration() != before:
             raise ValueError("hypothesis provider configuration changed")
         failure_stage = "parse"
-        decoded = json.loads(response.text)
+        decoded = _decode_candidate_json(response.text)
         proposals = decoded.get("candidates") if isinstance(decoded, dict) else None
         if not isinstance(proposals, list) or len(proposals) != 1:
             raise ValueError("hypothesis model must return exactly one candidate")
@@ -250,12 +344,18 @@ def generate_candidates(trace: dict, provider: Any, *, successful_traces: Iterab
         for proposal in proposals:
             if not isinstance(proposal, dict):
                 raise ValueError("hypothesis candidates must be objects")
+            if proposal.get("step_index") not in visible_steps:
+                raise ValueError("hypothesis step was not in the public eligible source view")
             draft = {**proposal, "schema_version": "repair-candidate.v3",
                      **_binding(trace, proposal.get("step_index")),
                      "proposed_by": "model:" + str(response.model), "generation": generation}
             if not draft.get("failure_signature"):
                 draft["failure_signature"] = source_failure_signature(trace, draft["step_index"])
             candidate = finalize_candidate(draft, trace)
+            source_context = PublicContext(**episode["steps"][candidate["step_index"]]["context"])
+            if evaluate_conditions(candidate["positive_conditions"],
+                                   candidate["exclusion_conditions"], source_context) != 1:
+                raise ValueError("hypothesis conditions do not hold at the source checkpoint")
             if any(c["candidate_hash"] == candidate["candidate_hash"] for c in candidates):
                 raise ValueError("hypothesis model returned duplicate candidates")
             candidates.append(candidate)
@@ -267,7 +367,8 @@ def generate_candidates(trace: dict, provider: Any, *, successful_traces: Iterab
                 "usage": {"model_calls": None, "physical_attempts": None,
                           "input_tokens": None, "output_tokens": None, "api_cost": None}}
             generation["usage"] = copy.deepcopy(generation["attempt"].get("usage"))
-        generation.update(status="error", error_type=type(exc).__name__, failure_stage=failure_stage)
+        generation.update(status="error", error_type=type(exc).__name__,
+                          error_message=str(exc), failure_stage=failure_stage)
         raise CandidateGenerationError("source hypothesis generation failed at " + failure_stage + ": " + type(exc).__name__,
                                        generation=generation, candidates=candidates) from exc
     return {"candidates": candidates, "generation": generation}

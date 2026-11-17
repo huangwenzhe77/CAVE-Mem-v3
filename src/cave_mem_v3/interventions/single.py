@@ -73,6 +73,11 @@ def _check_live_protocol(env, actor):
     from cave_mem_v3.environments.base import PreparationEnvironment
     if isinstance(env, PreparationEnvironment) and config.get("research_role") == "fixture_only":
         return
+    from cave_mem_v3.environments.alfworld import ALFWorldEnvironment
+    if isinstance(env, ALFWorldEnvironment):
+        if caps.get("randomized_single_supported") is not True or caps.get("restore_certified") is not True:
+            raise ValueError("ALFWorld text task does not support audited live collection")
+        return
     # A new live backend needs a concrete reviewed adapter; unsupported systems
     # are never made eligible by failing paired restoration.
     from cave_mem_v3.environments.terminal import TerminalEnvironment, PROTOCOL as TERMINAL_PROTOCOL, protocol_hash

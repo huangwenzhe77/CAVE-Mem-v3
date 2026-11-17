@@ -119,6 +119,48 @@ class CandidateTests(unittest.TestCase):
         self.assertNotIn("v", result["candidates"][0])
         validate_candidate(result["candidates"][0], trace)
 
+    def test_long_source_can_choose_middle_checkpoint_from_one_public_prompt(self):
+        trace = source_trace()
+        original = copy.deepcopy(trace["episode"]["steps"][0])
+        trace["episode"]["steps"] = []
+        for index in range(15):
+            step = copy.deepcopy(original)
+            step["index"] = index
+            step["context"]["observation"] = f"public checkpoint {index}"
+            trace["episode"]["steps"].append(step)
+        trace["trace_hash"] = digest({key: value for key, value in trace.items() if key != "trace_hash"})
+        self.assertEqual(len(eligible_source_steps(trace)), 15)
+        proposal = {"step_index": 7, "mechanism": "preparation is missing",
+                    "correction": {"type": "prepare"},
+                    "positive_conditions": [{"field": "requires_preparation", "equals": True}],
+                    "exclusion_conditions": [], "scope": "source checkpoint"}
+
+        class Provider:
+            calls = 0
+
+            def configuration(self):
+                return {"provider": "test"}
+
+            def generate(self, messages, **kwargs):
+                self.calls += 1
+                payload = json.loads(messages[1]["content"])
+                visible = payload["eligible_step_indices"]
+                self_test.assertIn(7, visible)
+                self_test.assertLessEqual(len(visible), 7)
+                failed = payload["failed"]
+                self_test.assertEqual(len(failed["steps"]) + len(failed["omitted_action_path"]), 15)
+                self_test.assertEqual(failed["expanded_step_selection"],
+                                      "first_two_last_two_and_eligible_quartiles.v1")
+                return SimpleNamespace(text=json.dumps({"candidates": [proposal]}), model="test-model",
+                                       usage={"model_calls": 1}, attempt={"status": "completed"})
+
+        self_test = self
+        provider = Provider()
+        result = generate_candidates(trace, provider)
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(len(result["candidates"]), 1)
+        self.assertEqual(result["candidates"][0]["step_index"], 7)
+
     def test_conditions_must_be_executable_and_failure_signature_is_recorded(self):
         trace = source_trace()
         candidate = repair(trace)
@@ -152,6 +194,25 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual(error.generation["status"], "error")
         self.assertTrue(error.generation["response_hash"])
         self.assertEqual(error.candidates, [])
+
+    def test_teacher_cannot_use_future_observation_as_source_condition(self):
+        proposal = {"step_index": 0, "mechanism": "missing preparation",
+                    "correction": {"type": "prepare"},
+                    "positive_conditions": [{"source": "observation", "regex": "future-only-token"}],
+                    "exclusion_conditions": [], "scope": "source checkpoint"}
+
+        class Provider:
+            def configuration(self):
+                return {"provider": "test"}
+
+            def generate(self, messages, **kwargs):
+                return SimpleNamespace(text=json.dumps({"candidates": [proposal]}), model="test-model",
+                                       usage={"model_calls": 1}, attempt={"status": "completed"})
+
+        with self.assertRaises(CandidateGenerationError) as caught:
+            generate_candidates(source_trace(), Provider())
+        self.assertEqual(caught.exception.generation["failure_stage"], "candidate_validation")
+        self.assertEqual(caught.exception.generation["status"], "error")
 
     def test_multiple_candidates_are_rejected_and_configuration_errors_preserve_metering(self):
         good = {"step_index": 0, "mechanism": "missing preparation", "correction": {"type": "prepare"},

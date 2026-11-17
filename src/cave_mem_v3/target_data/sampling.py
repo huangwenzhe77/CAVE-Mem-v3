@@ -31,6 +31,9 @@ class RiskHazard:
             raise ValueError("high_risk_probability must be >= low risk and < one")
         if not self.risk_rubric or not self.schema_version:
             raise ValueError("hazard and risk rubric versions are required")
+        if self.risk_rubric not in ("public-pre-action-risk-cues.v1",
+                                    "public-pre-action-risk-cues.v2"):
+            raise ValueError("unsupported public checkpoint risk rubric")
 
     def probability(self, features: dict) -> float:
         score = features.get("risk_score")
@@ -160,7 +163,7 @@ class OnlineCheckpointSampler:
                 raise ValueError("checkpoint context task_id differs from the sampled task")
             if prior_steps is None:
                 prior_steps = []
-            features = risk_features(public, prior_steps)
+            features = risk_features(public, prior_steps, rubric=self.hazard.risk_rubric)
             if features.get("risk_rubric") != self.hazard.risk_rubric:
                 raise ValueError("risk signal rubric differs from the frozen hazard configuration")
             probability = self.hazard.probability(features)

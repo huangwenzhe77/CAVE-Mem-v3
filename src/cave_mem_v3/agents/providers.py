@@ -97,6 +97,8 @@ class OpenAIConfig:
     token_limit_parameter: str = "max_tokens"
     send_temperature: bool = True
     response_format: str = "text"
+    thinking_mode: str = ""
+    reasoning_effort: str = ""
 
     def __post_init__(self) -> None:
         if not self.model or self.base_url and not self.base_url.startswith(("http://", "https://")):
@@ -114,6 +116,12 @@ class OpenAIConfig:
             raise ValueError("send_temperature must be boolean")
         if self.response_format not in ("text", "json_object"):
             raise ValueError("response_format must be text or json_object")
+        if self.thinking_mode not in ("", "enabled", "disabled"):
+            raise ValueError("thinking_mode must be empty, enabled, or disabled")
+        if self.reasoning_effort not in ("", "none", "low", "high", "max"):
+            raise ValueError("reasoning_effort must be empty, none, low, high, or max")
+        if self.thinking_mode and self.reasoning_effort:
+            raise ValueError("configure only one of thinking_mode or reasoning_effort")
         if type(self.max_output_tokens) is not int or self.max_output_tokens < 1:
             raise ValueError("max_output_tokens must be a positive integer")
         finite(self.temperature, "temperature", minimum=0)
@@ -189,6 +197,10 @@ class OpenAICompatibleProvider:
             payload["seed"] = seed
         if self.config.response_format == "json_object":
             payload["response_format"] = {"type": "json_object"}
+        if self.config.thinking_mode:
+            payload["thinking"] = {"type": self.config.thinking_mode}
+        if self.config.reasoning_effort:
+            payload["reasoning_effort"] = self.config.reasoning_effort
         requested = {k: v for k, v in payload.items() if k != "messages"}
         attempt = {"attempt_id": call_id or digest([stage, seed, payload])[:24],
                    "stage": stage, "status": "started", "request_hash": digest(payload),
@@ -264,12 +276,37 @@ class OpenAICompatibleProvider:
 
 def render_messages(context: PublicContext, *, reminder: str | None = None,
                     system_prompt: str = "Return exactly one executable action, without explanation.",
-                    demonstrations: tuple[str, ...] = ()) -> tuple[dict[str, str], ...]:
+                    demonstrations: tuple[str, ...] = (),
+                    max_history_chars: int | None = None) -> tuple[dict[str, str], ...]:
     """Only actual executed history persists. A reminder is local to this call."""
     sections = []
     if demonstrations:
         sections.append("Fixed demonstrations:\n" + "\n\n".join(demonstrations))
-    sections += ["Task:\n" + context.instruction, "Executed history:\n" + canonical(context.history),
+    history = canonical(context.history)
+    if max_history_chars is not None:
+        if type(max_history_chars) is not int or max_history_chars < 500:
+            raise ValueError("max_history_chars must be an integer of at least 500")
+        if len(history) > max_history_chars:
+            events = list(context.history)
+            actions = [event.get("action") for event in events if isinstance(event, dict)]
+            recent = [{"action": event.get("action"),
+                       "observation": str(event.get("observation", ""))[:500]}
+                      for event in events[-2:] if isinstance(event, dict)]
+            omitted = 0
+            history = canonical({"earlier_action_path": actions, "recent_events": recent,
+                                 "omitted_early_actions": omitted})
+            while len(history) > max_history_chars and actions:
+                actions.pop(0)
+                omitted += 1
+                history = canonical({"earlier_action_path": actions, "recent_events": recent,
+                                     "omitted_early_actions": omitted})
+            if len(history) > max_history_chars:
+                history = canonical({"earlier_action_path": actions,
+                                     "recent_events": recent[-1:],
+                                     "omitted_early_actions": omitted})
+            if len(history) > max_history_chars:
+                raise ValueError("max_history_chars is too small for one recent event")
+    sections += ["Task:\n" + context.instruction, "Executed history:\n" + history,
                  "Current observation:\n" + context.observation, "Visible facts:\n" + canonical(context.facts),
                  f"Remaining execution steps: {context.remaining_steps}"]
     if context.admissible_actions:
@@ -281,9 +318,11 @@ def render_messages(context: PublicContext, *, reminder: str | None = None,
 
 def render_target_messages(context: PublicContext, *, reminder: str | None = None,
                            system_prompt: str = "Return exactly one executable action, without explanation.",
-                           demonstrations: tuple[str, ...] = ()) -> tuple[dict[str, str], ...]:
+                           demonstrations: tuple[str, ...] = (),
+                           max_history_chars: int | None = None) -> tuple[dict[str, str], ...]:
     """Render one target call; advisory text never becomes persistent history."""
-    messages = render_messages(context, system_prompt=system_prompt, demonstrations=demonstrations)
+    messages = render_messages(context, system_prompt=system_prompt, demonstrations=demonstrations,
+                               max_history_chars=max_history_chars)
     if reminder is None:
         return messages
     if not isinstance(reminder, str) or not reminder.strip():
@@ -298,7 +337,24 @@ def parse_json_action(text: str) -> dict:
     clean = text.strip()
     if clean.startswith("```"):
         clean = re.sub(r"^```(?:json)?\s*|\s*```$", "", clean, flags=re.IGNORECASE)
-    action = json.loads(clean)
+    try:
+        action = json.loads(clean)
+    except json.JSONDecodeError:
+        # Some reasoning gateways append a complete JSON action before a
+        # truncated explanation. Recover only a complete object; never invent
+        # or repair its fields.
+        starts = [index for index, char in enumerate(clean) if char == "{"]
+        action = None
+        for start in reversed(starts):
+            try:
+                candidate = json.JSONDecoder().raw_decode(clean[start:])[0]
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict):
+                action = candidate
+                break
+        if action is None:
+            raise
     if not isinstance(action, dict) or not isinstance(action.get("type"), str):
         raise ValueError("expected JSON action object containing type")
     return action
@@ -309,30 +365,40 @@ class ProviderActor:
 
     def __init__(self, provider: Provider, *, parser: Callable[[str], dict] = parse_json_action,
                  system_prompt: str = "Return one JSON executable action containing type; no explanation.",
-                 demonstrations: tuple[str, ...] = (), prompt_version: str = "actor-prompt.v3") -> None:
+                 demonstrations: tuple[str, ...] = (), prompt_version: str = "actor-prompt.v3",
+                 max_history_chars: int | None = None) -> None:
+        if max_history_chars is not None and (type(max_history_chars) is not int or max_history_chars < 500):
+            raise ValueError("max_history_chars must be an integer of at least 500")
         self.provider = provider
         self.parser = parser
         self.system_prompt = system_prompt
         self.demonstrations = tuple(demonstrations)
         self.prompt_version = prompt_version
+        self.max_history_chars = max_history_chars
 
     def configuration(self) -> dict:
-        return {"actor": "stateless-provider-actor.v3", "provider": self.provider.configuration(),
+        result = {"actor": "stateless-provider-actor.v3", "provider": self.provider.configuration(),
                 "prompt_version": self.prompt_version, "system_prompt_hash": digest(self.system_prompt),
                 "demonstrations_hash": digest(self.demonstrations), "parser": self.parser.__name__}
+        if self.max_history_chars is not None:
+            result["max_history_chars"] = self.max_history_chars
+        return result
 
     def capabilities(self) -> dict:
         return {**self.provider.capabilities(), "history_owner": "collector", "reminder_persistence": "call_only"}
 
     def propose(self, context: PublicContext, *, stage: str, seed: int,
                 reminder: str | None = None, call_id: str = "") -> ActorResponse:
-        messages = render_messages(context, reminder=reminder, system_prompt=self.system_prompt, demonstrations=self.demonstrations)
+        messages = render_messages(context, reminder=reminder, system_prompt=self.system_prompt,
+                                   demonstrations=self.demonstrations,
+                                   max_history_chars=self.max_history_chars)
         return self._generate_action(messages, stage=stage, seed=seed, call_id=call_id)
 
     def propose_target(self, context: PublicContext, *, stage: str, seed: int,
                        reminder: str | None = None, call_id: str = "") -> ActorResponse:
         messages = render_target_messages(context, reminder=reminder, system_prompt=self.system_prompt,
-                                          demonstrations=self.demonstrations)
+                                          demonstrations=self.demonstrations,
+                                          max_history_chars=self.max_history_chars)
         return self._generate_action(messages, stage=stage, seed=seed, call_id=call_id)
 
     def _generate_action(self, messages, *, stage: str, seed: int, call_id: str) -> ActorResponse:

@@ -77,6 +77,26 @@ def _audit(item, env_factory, actor_factory, used):
             if digest(first.snapshot()) != item["checkpoint_hash"]:
                 raise ValueError("fixture mutation probe did not restore")
             report["probe"] = {"kind": "fixture_mutation", "branches_isolated": True}
+        elif adapter == "alfworld-text-prefix-replay.v1":
+            from cave_mem_v3.environments.alfworld import ALFWorldEnvironment
+            if not isinstance(first, ALFWorldEnvironment) or not first.capabilities().get("paired_primary_eligible"):
+                raise ValueError("ALFWorld adapter lacks reviewed paired restoration")
+            initial_second = digest(second.snapshot())
+            actions = first.observe().admissible_actions
+            if not actions:
+                raise ValueError("ALFWorld checkpoint has no public action for isolation probe")
+            probe_action = {"type": "text", "command": actions[0]}
+            result = first.step(probe_action, seed=0)
+            if (not result.valid or digest(first.snapshot()) == item["checkpoint_hash"]
+                    or digest(second.snapshot()) != initial_second):
+                raise ValueError("ALFWorld mutation probe did not isolate branches")
+            first.restore(copy.deepcopy(item["checkpoint"]))
+            if (digest(first.snapshot()) != item["checkpoint_hash"]
+                    or digest(second.snapshot()) != item["checkpoint_hash"]):
+                raise ValueError("ALFWorld mutation probe did not restore the checkpoint")
+            report["probe"] = {"kind": "alfworld_action_prefix_mutation",
+                               "command_hash": digest(probe_action),
+                               "branches_isolated": True, "restored": True}
         else:
             from cave_mem_v3.environments.terminal import TerminalEnvironment
             if not isinstance(first, TerminalEnvironment) or not first.capabilities().get("paired_primary_eligible"):

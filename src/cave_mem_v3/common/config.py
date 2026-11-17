@@ -24,8 +24,8 @@ def load_config(path: str | Path) -> dict:
         raise ValueError("actor.kind must be scripted or openai_compatible")
     if "teacher" in raw and raw["teacher"].get("kind") != "openai_compatible":
         raise ValueError("teacher.kind must be openai_compatible")
-    if raw["environment"].get("kind") not in ("fixture", "terminal"):
-        raise ValueError("environment.kind must be fixture or terminal")
+    if raw["environment"].get("kind") not in ("fixture", "terminal", "alfworld"):
+        raise ValueError("environment.kind must be fixture, terminal or alfworld")
     return copy.deepcopy(raw)
 
 

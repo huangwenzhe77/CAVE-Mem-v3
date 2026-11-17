@@ -121,13 +121,25 @@ def run_episode(env, actor, *, spec: StudySpec, seed: int, checkpoint=None,
                 step["action_origin"] = "actor"
                 pending_response = None
             step["action"] = action
-            if step["actor_response"] is not None and step["actor_response"].get("finish_reason") == "length":
+            if (step["actor_response"] is not None
+                    and step["actor_response"].get("finish_reason") == "length"):
                 step["validation_error"] = "model response reached the output token limit"
                 record.update(status="invalid_action", success=False,
                               termination_reason="model_output_truncated",
                               actor_behavior={"kind": "truncated_response", "step_index": index})
                 break
-            if step["actor_response"] is not None and step["actor_response"].get("parse_error") is not None:
+            repair_action = getattr(env, "repair_action", None)
+            if (step["actor_response"] is not None
+                    and step["actor_response"].get("parse_error") is not None
+                    and callable(repair_action)):
+                repaired = repair_action(action, context)
+                if repaired is not None:
+                    step["agent_error"] = step["actor_response"].get("parse_error")
+                    step["action"] = action = copy.deepcopy(repaired)
+                    step["action_origin"] = "agent_error_repair"
+            if (step["actor_response"] is not None
+                    and step["actor_response"].get("parse_error") is not None
+                    and "agent_error" not in step):
                 step["validation_error"] = "malformed_actor_action"
                 if (checkpoint_sampler is not None and sampling.get("selected") is True
                         and prepare_selected is not None):
@@ -156,6 +168,14 @@ def run_episode(env, actor, *, spec: StudySpec, seed: int, checkpoint=None,
                                   utility=None)
                     break
             valid, reason = env.validate_action(action)
+            if not valid:
+                repair_action = getattr(env, "repair_action", None)
+                repaired = repair_action(action, context) if callable(repair_action) else None
+                if repaired is not None:
+                    step["agent_error"] = reason
+                    step["action"] = action = copy.deepcopy(repaired)
+                    step["action_origin"] = "agent_error_repair"
+                    valid, reason = env.validate_action(action)
             if not valid:
                 step["validation_error"] = reason
                 record.update(status="invalid_action", success=False,

@@ -200,12 +200,22 @@ def _pair(root, run, item, memories):
             or not restores[0].get("fingerprint")):
         raise ValueError("passed audit lacks two matching actual checkpoint restores")
     probe = audit.get("probe", {})
-    if item["environment_config"].get("adapter") == "preparation-fixture.v3":
+    adapter = item["environment_config"].get("adapter")
+    if adapter == "preparation-fixture.v3":
         if probe != {"kind": "fixture_mutation", "branches_isolated": True}:
             raise ValueError("passed fixture audit lacks mutation isolation evidence")
-    elif not all(probe.get("filesystem_probe", {}).get(key) is True for key in (
-            "persisted_after_restore", "branches_isolated", "base_branch_isolated")):
-        raise ValueError("passed Terminal audit lacks filesystem isolation evidence")
+    elif adapter == "alfworld-text-prefix-replay.v1":
+        commands = item["context"].get("admissible_actions", [])
+        if (not commands or probe != {"kind": "alfworld_action_prefix_mutation",
+                "command_hash": digest({"type": "text", "command": commands[0]}),
+                "branches_isolated": True, "restored": True}):
+            raise ValueError("passed ALFWorld audit lacks action-prefix isolation evidence")
+    elif adapter == "terminal-bench-fs-boundary.v1":
+        if not all(probe.get("filesystem_probe", {}).get(key) is True for key in (
+                "persisted_after_restore", "branches_isolated", "base_branch_isolated")):
+            raise ValueError("passed Terminal audit lacks filesystem isolation evidence")
+    else:
+        raise ValueError("passed audit uses an unsupported environment adapter")
     if not (directory / "plan.json").exists():
         return seal(result)
     plan = checked(read_json(directory / "plan.json"), schema="target-pair-plan.v1")
