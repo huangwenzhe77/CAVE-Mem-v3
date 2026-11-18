@@ -22,6 +22,8 @@ def main() -> None:
     parser.add_argument("--target-per-family", type=int, default=8)
     parser.add_argument("--validation-per-family", type=int, default=2)
     parser.add_argument("--test-per-family", type=int, default=2)
+    parser.add_argument("--exclude-manifest", type=Path, action="append", default=[],
+                        help="omit every scene used by a prior exploratory split")
     args = parser.parse_args()
     if args.output.exists():
         raise ValueError("manifest output already exists")
@@ -31,8 +33,18 @@ def main() -> None:
         raise ValueError("all per-family role counts must be positive")
     reference = load_manifest(args.reference_manifest)
     root = args.train_root.resolve(strict=True)
+    excluded_scenes = set()
+    for old_path in args.exclude_manifest:
+        old = load_manifest(old_path)
+        for task in old["tasks"]:
+            trial = Path(task["path"]).resolve(strict=True)
+            if not trial.is_relative_to(root):
+                raise ValueError("excluded manifest has a task outside the ALFWorld train root")
+            excluded_scenes.add(trial.parent.name)
     scenes_by_family: dict[str, list[Path]] = {}
     for scene in sorted(path for path in root.iterdir() if path.is_dir()):
+        if scene.name in excluded_scenes:
+            continue
         family = scene.name.split("-", 1)[0]
         if any((trial / "game.tw-pddl").is_file() for trial in scene.iterdir() if trial.is_dir()):
             scenes_by_family.setdefault(family, []).append(scene)
@@ -69,6 +81,7 @@ def main() -> None:
         json.dump(manifest, stream, ensure_ascii=False, indent=2)
     print(json.dumps({"output": str(args.output.resolve()), "manifest_hash": manifest["manifest_hash"],
                       "role_counts": manifest["role_counts"],
+                      "excluded_scene_count": len(excluded_scenes),
                       "families": sorted(scenes_by_family)}, ensure_ascii=False))
 
 

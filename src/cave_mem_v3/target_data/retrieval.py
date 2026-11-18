@@ -8,6 +8,7 @@ from typing import Protocol, Sequence
 
 from cave_mem_v3.common.contracts import PublicContext, canonical, digest, plain
 from cave_mem_v3.memory_generation.bank import bank_memories
+from cave_mem_v3.memory_generation.predicates import evaluate_conditions
 
 
 class EmbeddingEncoder(Protocol):
@@ -37,6 +38,7 @@ class SentenceTransformerEncoder:
         self.identity = {"kind": "sentence_transformers", "model_path": str(path.resolve()),
                          "revision": revision, "device": device,
                          "normalization": "cosine_at_retrieval.v1",
+                         "ranking_policy": "alfworld_public_family_applicability_then_cosine.v1",
                          "weight_identity_status": "declared_revision_not_content_attestation"}
         self._model = SentenceTransformer(str(path), device=device, local_files_only=True)
 
@@ -107,6 +109,23 @@ def _memory_text(memory) -> str:
         "positive_conditions": memory.positive_conditions,
         "exclusion_conditions": memory.exclusion_conditions,
     })
+
+
+def _task_family_rank(memory, facts: dict) -> int:
+    """Prefer an explicitly matching public task family over an incompatible one."""
+    if (not isinstance(facts, dict) or facts.get("benchmark") != "alfworld-text"
+            or not isinstance(facts.get("task_type"), str)):
+        return 1
+    family_conditions = [condition for condition in memory.positive_conditions
+                         if condition.get("field") == "task_type" and "equals" in condition]
+    if not family_conditions:
+        return 1
+    return 2 if all(condition["equals"] == facts["task_type"] for condition in family_conditions) else 0
+
+
+def _applicability_rank(memory, context: PublicContext) -> int:
+    result = evaluate_conditions(memory.positive_conditions, memory.exclusion_conditions, context)
+    return {1: 2, "?": 1, 0: 0}[result]
 
 
 def _vector(value, name: str) -> list[float]:
@@ -180,14 +199,24 @@ def retrieve_memory(bank: dict, *, context: PublicContext | dict, action: dict,
         raise ValueError("query and document embedding dimensions differ")
 
     query_norm = math.sqrt(sum(value * value for value in query_vector))
+    facts = _public_value(plain(context).get("facts", {}) if isinstance(context, PublicContext)
+                          else context.get("facts", {}))
+    family_aware = isinstance(facts, dict) and facts.get("benchmark") == "alfworld-text"
+    public_context = None
+    if family_aware:
+        values = plain(context) if isinstance(context, PublicContext) else context
+        public_context = PublicContext(**{key: _public_value(values[key]) for key in (
+            "task_id", "instruction", "observation", "facts", "history",
+            "admissible_actions", "remaining_steps") if key in values})
     ranked = []
     for memory, vector in zip(memories, vectors):
         norm = math.sqrt(sum(value * value for value in vector))
         score = sum(left * right for left, right in zip(query_vector, vector)) / (query_norm * norm)
-        ranked.append((memory.memory_id, max(-1.0, min(1.0, score))))
-    ranked.sort(key=lambda item: (-item[1], item[0]))
+        ranked.append((memory.memory_id, max(-1.0, min(1.0, score)), _task_family_rank(memory, facts),
+                       _applicability_rank(memory, public_context) if family_aware else 1))
+    ranked.sort(key=lambda item: (-item[2], -item[3], -item[1], item[0]))
     candidates = [{"rank": rank, "memory_id": memory_id, "score": score}
-                  for rank, (memory_id, score) in enumerate(ranked, start=1)]
+                  for rank, (memory_id, score, _, _) in enumerate(ranked, start=1)]
     return {"schema_version": "target-memory-retrieval.v1", "status": "retrieved",
             "reason": None, "bank_hash": bank_hash,
             "encoder_identity": copy.deepcopy(encoder.identity),

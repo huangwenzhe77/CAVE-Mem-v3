@@ -37,6 +37,7 @@ class AutoTargetTests(unittest.TestCase):
             self.assertEqual(summarize_target_auto(root / "auto"), summary)
             dataset = build_policy_dataset([{"kind": "auto", "run": str(root / "auto")}])
             self.assertEqual(dataset["summary"]["label_counts"]["paired_outcomes"], 1)
+            self.assertEqual(dataset["summary"]["by_route"], {"paired": 1})
             self.assertEqual(dataset["rows"][0]["kind"], "paired")
             self.assertEqual(self.collect_again(source, root), summary)
 
@@ -63,6 +64,7 @@ class AutoTargetTests(unittest.TestCase):
             dataset = build_policy_dataset([{"kind": "auto", "run": str(root / "auto")}])
             self.assertEqual(dataset["summary"]["label_counts"]["observed_reward"], 1)
             self.assertEqual(dataset["summary"]["label_counts"]["paired_outcomes"], 0)
+            self.assertEqual(dataset["summary"]["by_route"], {"single": 1})
 
     def test_failed_restore_audit_falls_back_before_treatment_in_same_session(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -117,6 +119,7 @@ class AutoTargetTests(unittest.TestCase):
                 self.assertEqual(summary["counts"], {"none": 1})
                 dataset = build_policy_dataset([{"kind": "auto", "run": str(root / "auto")}])
                 self.assertEqual(dataset["summary"]["by_reason"], {reason: 1})
+                self.assertEqual(dataset["summary"]["by_route"], {"none": 1})
                 self.assertEqual(dataset["summary"]["label_counts"]["observed_reward"], 0)
 
 

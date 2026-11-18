@@ -326,6 +326,9 @@ def _auto(source, run):
             observation=observation, inclusion=observation.get("inclusion_probability")
                 if kind == "single" else item["selection"].get("inclusion_probability"),
             checkpoint=checkpoint, costs=costs)
+        # Keep the actual auto route separate from the legacy row shape. A
+        # blocked/excluded `none` route has no randomized single-arm outcome.
+        row["route_kind"] = entry["kind"]
         rows.append(_add_posthoc_x(row, exposure.get(pair_item["record_hash"]) if kind == "paired" else None))
     return run, summary, rows, identities
 
@@ -428,6 +431,7 @@ def build_policy_dataset(sources, *, role="target_train", validation_role=None):
         "unavailable_roles": [p for p in ("target_train", "validation/calibration", "validation/selection", "test") if p != partition],
         "fixture_only": software_only, "served_identity": _served_identity(all_identities), "rows": rows,
         "summary": {"planned": len(rows), "by_kind": dict(Counter(r["kind"] for r in rows)),
+            "by_route": dict(Counter(r.get("route_kind", r["kind"]) for r in rows)),
             "by_status": dict(Counter(r["status"] for r in rows)),
             "by_reason": dict(Counter(r["reason"] for r in rows if r["reason"])),
             "label_counts": {name: sum(r["label_masks"][name] for r in rows) for name in rows[0]["label_masks"]},

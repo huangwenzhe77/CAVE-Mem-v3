@@ -73,6 +73,21 @@ class CandidateTests(unittest.TestCase):
             finalize_candidate(templates[0], trace)
         validate_candidate(repair(trace), trace)
 
+    def test_text_correction_must_be_admissible_at_the_source_checkpoint(self):
+        trace = source_trace()
+        step = trace["episode"]["steps"][0]
+        step["action"] = {"type": "text", "command": "go to kitchen"}
+        step["context"]["admissible_actions"] = ["go to kitchen", "go to bathroom"]
+        trace["trace_hash"] = digest({k: v for k, v in trace.items() if k != "trace_hash"})
+        draft = candidate_templates([trace])[0]
+        draft.update(mechanism="source route may be wrong", scope="source checkpoint",
+                     proposed_by="teacher", positive_conditions=[{"field": "requires_preparation", "equals": True}],
+                     correction={"type": "text", "command": "go to bathroom"})
+        self.assertEqual(finalize_candidate(draft, trace)["correction"]["command"], "go to bathroom")
+        draft["correction"]["command"] = "examine fridge"
+        with self.assertRaisesRegex(ValueError, "not an admissible action"):
+            finalize_candidate(draft, trace)
+
     def test_provenance_and_hypothesis_cannot_change_after_sealing(self):
         trace = source_trace()
         candidate = repair(trace)
@@ -100,6 +115,8 @@ class CandidateTests(unittest.TestCase):
         trace = source_trace()
         trace["episode"]["private_verifier"] = {"secret": "DO_NOT_SHOW_VERIFIER"}
         trace["episode"]["steps"][0]["checkpoint"]["private_secret"] = "DO_NOT_SHOW_SNAPSHOT"
+        trace["episode"]["steps"][0]["context"]["facts"]["task_type"] = "public_family"
+        trace["episode"]["steps"][0]["context"]["facts"]["private_verifier"] = "DO_NOT_SHOW_FACT"
         trace["trace_hash"] = digest({k: v for k, v in trace.items() if k != "trace_hash"})
         proposal = {"step_index": 0, "mechanism": "Preparation is missing", "correction": {"type": "prepare"},
                     "positive_conditions": [{"field": "requires_preparation", "equals": True}],
@@ -111,6 +128,8 @@ class CandidateTests(unittest.TestCase):
                 content = json.dumps(messages)
                 self_test.assertNotIn("DO_NOT_SHOW_VERIFIER", content)
                 self_test.assertNotIn("DO_NOT_SHOW_SNAPSHOT", content)
+                self_test.assertNotIn("DO_NOT_SHOW_FACT", content)
+                self_test.assertIn("public_family", content)
                 return SimpleNamespace(text=json.dumps({"candidates": [proposal]}), model="hypothesis-test",
                                        usage={"model_calls": 1}, attempt={"status": "completed"})
         self_test = self
@@ -198,6 +217,7 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual(error.generation["failure_stage"], "parse")
         self.assertEqual(error.generation["status"], "error")
         self.assertTrue(error.generation["response_hash"])
+        self.assertEqual(error.generation["response_text"], "not json")
         self.assertEqual(error.candidates, [])
 
     def test_teacher_cannot_use_future_observation_as_source_condition(self):
@@ -218,6 +238,60 @@ class CandidateTests(unittest.TestCase):
             generate_candidates(source_trace(), Provider())
         self.assertEqual(caught.exception.generation["failure_stage"], "candidate_validation")
         self.assertEqual(caught.exception.generation["status"], "error")
+        self.assertIn("future-only-token", caught.exception.generation["response_text"])
+
+    def test_teacher_task_type_syntax_is_normalized_but_still_source_checked(self):
+        trace = source_trace()
+        trace["episode"]["steps"][0]["context"]["facts"]["task_type"] = "public_family"
+        trace["trace_hash"] = digest({k: v for k, v in trace.items() if k != "trace_hash"})
+
+        class Provider:
+            def __init__(self, condition):
+                self.condition = condition
+            def configuration(self):
+                return {"provider": "test"}
+            def generate(self, messages, **kwargs):
+                proposal = {"step_index": 0, "mechanism": "missing preparation",
+                            "correction": {"type": "prepare"},
+                            "positive_conditions": [self.condition], "exclusion_conditions": [],
+                            "scope": "source checkpoint"}
+                return SimpleNamespace(text=json.dumps({"candidates": [proposal]}), model="test-model",
+                                       usage={"model_calls": 1}, attempt={"status": "completed"})
+
+        variants = [
+            {"source": "public_task_facts.task_type", "equals": "public_family"},
+            {"field": "task_type", "operator": "equals", "value": "public_family",
+             "source": "public_task_facts"},
+        ]
+        for variant in variants:
+            result = generate_candidates(trace, Provider(variant))
+            self.assertEqual(result["candidates"][0]["positive_conditions"],
+                             [{"field": "task_type", "equals": "public_family"}])
+            self.assertEqual(len(result["generation"]["predicate_normalizations"]), 1)
+        with self.assertRaises(CandidateGenerationError):
+            generate_candidates(trace, Provider({"source": "public_task_facts.task_type",
+                                                 "equals": "different_family"}))
+
+    def test_recovery_feedback_is_public_and_keeps_one_candidate(self):
+        prior = {"error_message": "correction is identical to the original action",
+                 "response_text": '{"candidates":[]}'}
+
+        class Provider:
+            def configuration(self):
+                return {"provider": "test"}
+            def generate(self, messages, **kwargs):
+                self_test.assertEqual(json.loads(messages[-1]["content"].split("\n", 1)[1]), prior)
+                proposal = {"step_index": 0, "mechanism": "missing preparation",
+                            "correction": {"type": "prepare"},
+                            "positive_conditions": [{"field": "requires_preparation", "equals": True}],
+                            "exclusion_conditions": [], "scope": "source checkpoint"}
+                return SimpleNamespace(text=json.dumps({"candidates": [proposal]}), model="test-model",
+                                       usage={"model_calls": 1}, attempt={"status": "completed"})
+
+        self_test = self
+        result = generate_candidates(source_trace(), Provider(), previous_rejection=prior)
+        self.assertEqual(len(result["candidates"]), 1)
+        self.assertEqual(result["generation"]["previous_rejection_hash"], digest(prior))
 
     def test_multiple_candidates_are_rejected_and_configuration_errors_preserve_metering(self):
         good = {"step_index": 0, "mechanism": "missing preparation", "correction": {"type": "prepare"},

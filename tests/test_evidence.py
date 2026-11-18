@@ -205,6 +205,19 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(evidence["v"], "?")
         self.assertEqual(evidence["reason"], "replay_contains_error_or_invalid_repair")
 
+    def test_repaired_or_substituted_first_action_cannot_confirm_candidate(self):
+        def runner(env, actor, **kwargs):
+            if kwargs["first_action"] == {"type": "prepare"}:
+                kwargs["first_action"] = {"type": "operate"}
+            return run_episode(env, actor, **kwargs)
+
+        evidence = self.evidence(episode_runner=runner)
+        self.assertEqual(len(evidence["pairs"]), 2)
+        self.assertTrue(all(not row["valid"] for row in evidence["pairs"]))
+        self.assertEqual(evidence["v"], "?")
+        self.assertEqual(evidence["reason"], "replay_contains_error_or_invalid_repair")
+        self.assertEqual(validate_evidence(evidence, trace=self.trace)["v"], "?")
+
     def test_changed_actor_and_uncertified_restoration_fail_closed(self):
         evidence = verify_candidate(self.candidate, self.trace,
             lambda: PreparationEnvironment(task_id="source-a"), lambda: ScriptedActor(error_rate=0.1),

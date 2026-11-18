@@ -215,6 +215,9 @@ def _collect_pair(plan: dict, checkpoint: dict, env_factory: Callable, actor_fac
     original, corrected = row["arms"]["original"], row["arms"]["corrected"]
     row["valid"] = (original["status"] != "error" and corrected["status"] not in ("error", "invalid_action")
                     and corrected.get("termination_reason") not in ("invalid_actor_output", "model_output_truncated")
+                    and all(arm.get("steps") and arm["steps"][0].get("action") == action
+                            for arm, action in ((original, candidate["problem_action"]),
+                                                (corrected, candidate["correction"])))
                     and original.get("restore_fingerprint") is not None
                     and original.get("restore_fingerprint") == corrected.get("restore_fingerprint"))
     row["record_hash"] = digest(row)
@@ -269,7 +272,10 @@ def _check_records(rows: list[dict], plan: dict) -> tuple[list[float], bool]:
                 raise ValueError("source arm lacks restoration/stateless certification")
             steps = arm.get("steps", [])
             if not steps or steps[0].get("action") != expected_action:
-                raise ValueError("source first action was not executed/recorded")
+                # The adapter may repair an invalid proposed action into a
+                # different executable command. That branch is measured, but
+                # it cannot confirm the candidate's declared replacement.
+                row_usable = False
             costs = arm.get("costs", {})
             for key, bound in {"model_calls": study.max_model_calls, "tool_calls": study.max_steps, **spec.cost_upper_bounds}.items():
                 if costs.get(key) is None or finite(costs[key], key, minimum=0) > bound:

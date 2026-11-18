@@ -93,6 +93,48 @@ class TargetMemoryRetrievalTests(unittest.TestCase):
                                      encoder=encoder)
         self.assertEqual([row["memory_id"] for row in result["candidates"]], ["mem-a", "mem-b"])
 
+    def test_public_alfworld_family_beats_higher_cross_family_cosine(self):
+        context = PublicContext("target-1", "Heat a mug.", "A fridge is closed.",
+                                facts={"benchmark": "alfworld-text",
+                                       "task_type": "pick_heat_then_place_in_recep"})
+        cool = memory("mem-cool", "cooling", "secret")
+        cool.positive_conditions = ({"field": "task_type", "equals": "pick_cool_then_place_in_recep"},)
+        heat = memory("mem-heat", "heating", "secret")
+        heat.positive_conditions = ({"field": "task_type", "equals": "pick_heat_then_place_in_recep"},)
+        encoder = FakeEncoder()
+
+        def documents(texts):
+            return [[1.0, 0.0] if '"cooling"' in text else [0.8, 0.6] for text in texts]
+
+        encoder.encode_documents = documents
+        with patch("cave_mem_v3.target_data.retrieval.bank_memories", return_value=[cool, heat]):
+            result = retrieve_memory(self.bank, context=context, action={"type": "text", "command": "look"},
+                                     encoder=encoder)
+        self.assertEqual(result["selected_memory_id"], "mem-heat")
+        self.assertEqual([row["memory_id"] for row in result["candidates"]], ["mem-heat", "mem-cool"])
+        self.assertAlmostEqual(result["similarity_score"], 0.8)
+
+    def test_applicable_same_family_memory_beats_higher_cosine(self):
+        context = PublicContext("target-1", "Heat a mug.", "The fridge is closed.",
+                                facts={"benchmark": "alfworld-text",
+                                       "task_type": "pick_heat_then_place_in_recep"})
+        inapplicable = memory("mem-high", "high score", "secret")
+        inapplicable.positive_conditions = (
+            {"field": "task_type", "equals": "pick_heat_then_place_in_recep"},
+            {"source": "observation", "regex": "microwave is open"})
+        applicable = memory("mem-low", "lower score", "secret")
+        applicable.positive_conditions = (
+            {"field": "task_type", "equals": "pick_heat_then_place_in_recep"},
+            {"source": "observation", "regex": "fridge is closed"})
+        encoder = FakeEncoder()
+        encoder.encode_documents = lambda texts: [
+            [1.0, 0.0] if '"high score"' in text else [0.8, 0.6] for text in texts]
+        with patch("cave_mem_v3.target_data.retrieval.bank_memories",
+                   return_value=[inapplicable, applicable]):
+            result = retrieve_memory(self.bank, context=context,
+                                     action={"type": "text", "command": "look"}, encoder=encoder)
+        self.assertEqual(result["selected_memory_id"], "mem-low")
+
     def test_empty_verified_bank_returns_no_match(self):
         empty = frozen_bank()
         result = retrieve_memory(empty, context=self.context, action={"type": "finish"},

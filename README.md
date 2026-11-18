@@ -67,6 +67,14 @@ python examples/four_phase_learning_demo.py --output runs/four-phase-learning-de
 
 示例仅使用开发 fixture，产出可检查的轨迹、候选、回放证据和 `bank.json`。相同输出目录不能覆盖重跑；更换 `--output` 即可保留每次结果。
 
+真实 ALFWorld 批量运行前，给 TextWorld 设置空间充足的**本机**临时目录，并先执行 `scripts/check_alfworld_runtime.py`。该检查实际启动一个清单内的游戏、审核独立恢复，并可加载本地编码器；不请求 actor/teacher。共享 `/tmp` 可能在长批次耗尽，网络文件系统可能因打开的动态库留下 `.nfs` 文件而使清理失败。检查通过后在同一 `TMPDIR` 和 Python 环境中运行正式命令，错误批次保留在原目录，重跑使用新输出路径。示例：
+
+```bash
+mkdir -p /var/tmp/cave-alfworld
+export TMPDIR=/var/tmp/cave-alfworld
+python scripts/check_alfworld_runtime.py --manifest <manifest.json> --role target_train --max-steps 15 --tmp-dir "$TMPDIR" --encoder-path <local-encoder> --encoder-revision <pinned-revision>
+```
+
 真实教师输出若截断或解析失败，可在提高冻结的教师输出预算后使用新输出路径执行 `cave3 candidates --generate --collection <history> --config <new-teacher.toml> --reuse-successes-from <old-candidates.json> --output <new-candidates.json>`。它校验并复用同一历史批次已成功的每条唯一候选，只对失败项发起一次新请求；旧费用和失败记录保留，不产生同一历史轨迹的多个有效候选。
 
 真实 Terminal-Bench 的官方测试可能在容器内下载依赖，超过任务清单中的 600 秒执行保护。Enroot 运行时可设置 `CAVE_VERIFIER_TIMEOUT_FLOOR_SECONDS=1800`，仅延长宿主机等待私有测试结束的时间；任务、测试脚本、奖励判定、actor 配置及冻结任务协议保持原样，实际等待上限写入私有验证结果。重跑仍需使用新的输出目录以保留原始超时证据。

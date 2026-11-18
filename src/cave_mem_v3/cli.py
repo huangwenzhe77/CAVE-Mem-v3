@@ -583,6 +583,7 @@ def _candidates(args):
                                 else "not_a_scored_task_failure")}
                     for t in traces if t["episode"].get("success") is False and t not in failures]
         reused = {}
+        prior_rejections = {}
         prior_hash = None
         if args.reuse_successes_from:
             prior = read_json(args.reuse_successes_from)
@@ -604,6 +605,16 @@ def _candidates(args):
                     reused[trace["trace_id"]] = {"candidates": matches, "generation": generation}
                 elif generation.get("status") != "error" or matches:
                     raise ValueError("prior failed generation contains an unexpected candidate")
+                else:
+                    response_text = generation.get("response_text")
+                    if response_text is not None:
+                        if (not isinstance(response_text, str)
+                                or generation.get("response_hash") != digest(response_text)):
+                            raise ValueError("prior rejected response differs from its recorded hash")
+                        prior_rejections[trace["trace_id"]] = {
+                            "error_message": str(generation.get("error_message", "")),
+                            "response_text": response_text,
+                        }
             if len(prior_candidates) != len(reused):
                 raise ValueError("prior candidate batch has unregistered candidates")
         plan = {"source_run_hash": traces[0]["run_hash"], "source_trace_hashes": [t["trace_hash"] for t in traces],
@@ -642,7 +653,8 @@ def _candidates(args):
                                  and scored_source_outcome(t["episode"]) is True]
                     try:
                         result = generate_candidates(trace, provider, successful_traces=successes,
-                                                     max_candidates=args.max_candidates, seed=trace["seed"])
+                                                     max_candidates=args.max_candidates, seed=trace["seed"],
+                                                     previous_rejection=prior_rejections.get(trace["trace_id"]))
                     except Exception as exc:
                         generation = getattr(exc, "generation", None)
                         if generation is None:
